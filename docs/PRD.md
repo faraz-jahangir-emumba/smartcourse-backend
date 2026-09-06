@@ -78,8 +78,11 @@ does break, we can find out what and why in minutes.
 
 ### In scope — Part A (the core platform)
 
-- Accounts, login, and the three roles above
+- Accounts, login, and the three roles above. A user can hold more than one
+  role — an instructor can also enroll as a student
 - Creating and editing courses, modules and lessons
+- Uploading course material of any type, and pulling text out of it in the
+  background so the assistant can search it later
 - Publishing a course, including all the background work that follows
 - Enrolling students, with rules about duplicates, limits and prerequisites
 - Tracking progress and completion
@@ -105,7 +108,9 @@ assignment is asking about.
 
 - Any user interface. This is a backend only.
 - Payments, pricing, refunds
-- Video hosting and streaming
+- Video streaming and playback — seeking, adaptive bitrate, a player. Storing
+  video files and transcribing them **is** in scope; serving them to a viewer
+  is not.
 - Mobile apps
 - Live classes, chat between students, forums
 - Deploying to real servers. Everything runs locally in Docker.
@@ -202,6 +207,38 @@ left staring at a frozen screen.
 
 ---
 
+### UC-07 — An instructor also becomes a student
+
+An instructor teaches one subject but wants to learn another. They choose
+"become a student", which adds the student role to the account they already
+have. They keep everything they had as an instructor, and can now enroll in
+courses like anyone else.
+
+The same works the other way: a student can take on the instructor role and
+start authoring.
+
+**Why it matters:** a person is one account with a set of roles, not one role.
+Nothing in the system should assume a user has exactly one.
+
+---
+
+### UC-08 — An instructor uploads course material
+
+The instructor attaches a file to a lesson — a document, a PDF, a video,
+anything. The upload finishes straight away; the file is stored and marked as
+waiting for processing.
+
+In the background the system pulls the text out of it, where that is possible,
+and saves it against the file. Text and PDF files are read directly. Video and
+audio need transcribing, which takes longer. Images and other formats are kept
+but have no text to extract, and are marked as such.
+
+**If extraction fails:** the file is still stored and still downloadable. The
+failure is recorded against it so it can be seen and retried, rather than
+disappearing quietly.
+
+---
+
 ## 6. Functional requirements
 
 What the system must do. Each one has an ID so I can point at it later.
@@ -209,15 +246,19 @@ What the system must do. Each one has an ID so I can point at it later.
 | ID | Requirement | Part |
 |---|---|---|
 | FR-01 | People can register and log in | A |
-| FR-02 | Every user is a student, an instructor, or an admin | A |
-| FR-03 | Users can only do what their role allows | A |
+| FR-02 | Every user holds one or more roles: student, instructor or admin | A |
+| FR-03 | Users can only do what their roles allow | A |
+| FR-03a | An instructor can take on the student role and enroll in courses | A |
 | FR-04 | Instructors can create and edit courses, modules and lessons | A |
 | FR-05 | Students can browse and search published courses | A |
 | FR-06 | A student cannot enroll in the same course twice | A |
 | FR-07 | Enrollment respects course capacity limits | A |
 | FR-08 | Enrollment respects prerequisite courses | A |
+| FR-08a | A prerequisite that would create a circular dependency is rejected | A |
 | FR-09 | Enrolling creates a progress record | A |
 | FR-10 | Past enrollments are kept as history | A |
+| FR-10a | Instructors can upload files of any type against a lesson | A |
+| FR-10b | Text is extracted from uploaded files in the background, and failures are visible and retryable | A |
 | FR-11 | Publishing splits lesson content into searchable pieces | A |
 | FR-12 | A course is only marked ready when all its background work finishes | A |
 | FR-13 | A failed publish never leaves a course half-published | A |
@@ -279,6 +320,9 @@ The brief leaves gaps on purpose. Here is where I filled one in, and why.
 | A-04 | How students are notified | Email only, captured locally so nothing real is sent | Adding SMS or push would be more of the same work, not new learning. |
 | A-05 | What "fast" means | See the numbers in section 7 | Something testable is better than something vague. |
 | A-06 | How big a course is | Up to 20 modules, 200 lessons, 500 words per lesson | I need a size to design chunking and indexing around. |
+| A-07 | Whether one person can be both instructor and student | A user holds a set of roles, not one. Someone registered as an instructor can take on the student role and enroll. | Real platforms work this way — an instructor teaching one subject may want to learn another. Forcing two accounts for one person is worse than the small extra cost of storing a set. |
+| A-08 | Which file types instructors can upload, and what "content extraction" means | Any file type can be uploaded and stored. Text is extracted from `.txt`, `.md` and `.pdf`. Video and audio are stored, and transcription is planned but is the first thing to drop if time runs short. Images and other types are stored with extraction marked not applicable. | The brief says "upload learning materials" and "content extraction" but never names a format. Storing anything is cheap; extraction is what feeds the assistant, so it needs a defined set. The architecture is identical for every type — only the extractor differs — so adding formats later changes no design. |
+| A-09 | Where uploaded files are stored | **Not decided yet.** The `assets` table records a `storage_path` pointing at wherever the bytes live; the destination is chosen before assets are built in Module 2. | Nothing in the schema depends on the answer — only the code that reads and writes bytes does. Deciding early would be guessing without knowing the file sizes and volumes involved. |
 
 ---
 
