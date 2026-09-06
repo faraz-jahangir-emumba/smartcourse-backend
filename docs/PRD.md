@@ -311,12 +311,3 @@ tested. Filled in as I go — not at the end.
 | FR-19, FR-20 | | | | 7 |
 | FR-21, FR-22 | | | | 8 |
 | FR-23 to FR-26 | | | | 9 |
-
----
-
-## 11. Open questions
-
-- Is 31 October the date my mentor has on record, or just my own target?
-- How often are reviews, and who runs them?
-- Does Part B formally need Part A signed off first?
-- Is there a licence position on Docker Desktop at eMumba?

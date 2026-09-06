@@ -3,7 +3,6 @@
 This is the entry point. Uvicorn imports the `app` object below and serves it.
 """
 
-"""uv run uvicorn smartcourse.main:app --reload --port 8000"""
 from fastapi import FastAPI
 
 # Creating the application. The title and version show up on the /docs page
