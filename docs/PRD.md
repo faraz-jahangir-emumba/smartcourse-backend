@@ -259,7 +259,9 @@ What the system must do. Each one has an ID so I can point at it later.
 | FR-10 | Past enrollments are kept as history | A |
 | FR-10a | Instructors can upload files of any type against a lesson | A |
 | FR-10b | Text is extracted from uploaded files in the background, and failures are visible and retryable | A |
-| FR-11 | Publishing splits lesson content into searchable pieces | A |
+| FR-10c | Lesson titles and content can be searched by keyword | A |
+| FR-11 | Publishing splits lesson content into searchable pieces (chunks) | A |
+| FR-11a | Re-publishing does not redo work for content that has not changed | A |
 | FR-12 | A course is only marked ready when all its background work finishes | A |
 | FR-13 | A failed publish never leaves a course half-published | A |
 | FR-14 | Students can mark lessons complete and see their progress | A |

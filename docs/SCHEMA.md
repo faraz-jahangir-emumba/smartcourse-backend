@@ -16,14 +16,17 @@ users
        ├─ course_prerequisites (course_id, prerequisite_course_id)
        ├─ modules (course_id)
        │    └─ lessons (module_id)
-       │         └─ assets (lesson_id)
+       │         ├─ assets (lesson_id)
+       │         └─ chunks (lesson_id, asset_id)
        └─ enrollments (course_id, student_id)
             └─ lesson_progress (enrollment_id, lesson_id)
+
+failed_events   (stands alone - records failures from every mechanism)
 ```
 
-Eight tables. The left spine is the content hierarchy — a course holds modules,
-which hold lessons, which hold uploaded files. The right side is what students
-do with it.
+Ten tables. The left spine is the content hierarchy — a course holds modules,
+which hold lessons, which hold uploaded files and the chunks cut from them. The
+right side is what students do with it.
 
 ---
 
@@ -241,7 +244,93 @@ not change per format; only the extractor does.
 
 ---
 
-## 7. enrollments
+## 7. chunks
+
+Lesson material cut into retrievable pieces. Part A, Core Functional
+Requirements §2 names these explicitly — *"broken into components (modules,
+lessons, chunks)"* — and §4 lists *"preparing course material for intelligent
+Q&A"* as a Part A background task. They are produced here and consumed by
+Part B.
+
+| Column | Type | Constraints | Why |
+|---|---|---|---|
+| `id` | uuid | primary key | |
+| `lesson_id` | uuid | → `lessons.id`, **CASCADE** | Always known, so answers can cite a lesson (FR-22) |
+| `asset_id` | uuid | → `assets.id`, **CASCADE**, nullable | Which file it came from. Null means it came from `lessons.content` |
+| `content` | text | not null | The chunk itself |
+| `position` | integer | not null | Order within its source, so neighbours can be found |
+| `token_count` | integer | not null | Budgeting what fits in a prompt |
+| `content_hash` | text | not null | Skip re-embedding text that has not changed |
+| `created_at` | timestamptz | not null | |
+
+**UNIQUE (lesson_id, asset_id, position)**
+
+Index on `content_hash` — it is looked up on every republish.
+
+### Why chunks rather than whole lessons
+
+Two limits force it.
+
+An LLM can only read so much at once. A course may hold 200 lessons; the
+assistant must be given only the few passages likely to answer the question. The
+content has to already be in passage-sized pieces for that to be possible.
+
+And embeddings blur as text grows. An embedding represents one piece of text as
+one point in meaning-space. That is sharp when the text covers one idea, and
+useless when it averages five — the result sits slightly near everything and
+close to nothing.
+
+Chunk size is the trade-off between those: small enough to mean one thing, large
+enough to still make sense alone. Around 300–500 tokens, with 10–15% overlap so
+an idea spanning a boundary survives in at least one piece.
+
+Tokens rather than characters because that is the unit models count. Counting
+them needs a tokenizer library at chunking time.
+
+### Why `lesson_id` is never null
+
+A chunk from a PDF still belongs to a lesson. Keeping the link direct means
+citation never has to walk back through the asset, and a chunk is never
+orphaned from the thing a student can actually open.
+
+### `content_hash` and republishing
+
+Editing one lesson and republishing must not re-embed the whole course —
+embedding costs time and money in proportion to volume.
+
+So publishing recomputes chunks, hashes each one, and compares. Unchanged
+hashes keep their existing embeddings; only new or changed chunks are
+re-embedded. A cheap column now that saves the expensive work later.
+
+---
+
+## 8. failed_events
+
+Part A §5 lists **"Failed Events / Workflow Issues"** among the nine metrics, so
+failures need somewhere to live rather than only a log line.
+
+| Column | Type | Constraints | Why |
+|---|---|---|---|
+| `id` | uuid | primary key | |
+| `source` | text | not null, CHECK | `kafka` / `celery` / `temporal` |
+| `source_name` | text | not null | Topic, task or workflow name |
+| `payload` | jsonb | not null | What was being processed, so it can be retried |
+| `error` | text | not null | What went wrong |
+| `retry_count` | integer | not null, default 0 | How many attempts so far |
+| `status` | text | not null, default `pending`, CHECK | `pending` / `retrying` / `resolved` / `abandoned` |
+| `occurred_at` | timestamptz | not null, default now() | |
+| `resolved_at` | timestamptz | nullable | |
+
+Detailed in Module 3, when Kafka, Celery and Temporal arrive and there is
+something to fail. Recorded here so the metric has a source and the schema
+does not have to change later.
+
+`payload` is `jsonb` rather than text because the three sources carry different
+shapes, and jsonb can still be queried.
+
+---
+
+## 9. enrollments
 
 | Column | Type | Constraints | Why |
 |---|---|---|---|
@@ -287,7 +376,7 @@ recorded at the time.
 
 ---
 
-## 8. lesson_progress
+## 10. lesson_progress
 
 One row each time a student finishes a lesson. UC-03.
 
@@ -340,6 +429,8 @@ the parent, not the row holding the key.
 | `modules.course_id` | a course | **CASCADE** | A module alone is unreachable |
 | `lessons.module_id` | a module | **CASCADE** | Same |
 | `assets.lesson_id` | a lesson | **CASCADE** | Same |
+| `chunks.lesson_id` | a lesson | **CASCADE** | Chunks are derived from it |
+| `chunks.asset_id` | an asset | **CASCADE** | Same |
 | `enrollments.student_id` | a user | **RESTRICT** | History has value |
 | `enrollments.course_id` | a course | **RESTRICT** | History has value |
 | `lesson_progress.enrollment_id` | an enrollment | **CASCADE** | Belongs to it |
@@ -351,6 +442,45 @@ data outlives whatever created it.
 
 `SET NULL` is used nowhere — nothing in this design is meaningful while
 orphaned.
+
+---
+
+## Search
+
+Part A §2 requires content stored in a structure supporting *"Fast retrieval"*
+and *"Search"*.
+
+Worth separating two things the brief keeps apart. Part A asks for **search**;
+Part B's version of the same section asks for *"context-based queries"*. They
+are different problems:
+
+- **Search (Part A)** — the words the student typed. Postgres does this itself.
+- **Semantic search (Part B)** — meaning rather than words, via embeddings over
+  the `chunks` table. Module 4.
+
+Postgres full-text search covers the Part A half with no extra service:
+
+```sql
+-- on lessons
+search_vector tsvector GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce(title, '')),   'A') ||
+    setweight(to_tsvector('english', coalesce(content, '')), 'B')
+) STORED
+```
+
+plus a GIN index on it. The same on `courses` over title and description, for
+FR-05.
+
+**Why a generated column** rather than filling it in application code: Postgres
+maintains it on every insert and update, automatically. There is no path — a
+migration, a seed script, a manual fix — that can leave it stale, and no trigger
+to write or test.
+
+**`setweight`** ranks a title match above a body match, so a lesson *called*
+"Recursion" beats one that mentions the word in passing.
+
+**`'english'`** applies English stemming, so "running" matches "run". It also
+means the language is a decision baked into the column — noted in known gaps.
 
 ---
 
@@ -410,6 +540,9 @@ run out and need renumbering anyway.
 |---|---|
 | Circular prerequisite chains beyond one hop | Enforced in the service layer with a recursive query, not by a constraint. FR-08a |
 | Two instructors editing one course at once | Last write wins today. If it becomes a real problem, add a `version` column to `courses` and reject writes carrying a stale version |
+| Full-text search is English-only | `to_tsvector('english', ...)` is fixed in the generated column. Multi-language would need a language column per row and a different index strategy |
+| Chunk size and overlap are not yet fixed | Decided in Module 2 when publishing is built, and it must be right — Module 4's embeddings are built on whatever it produces |
+| Embeddings for chunks | Module 4. A vector column is added to `chunks`; nothing else about the table changes |
 | Content chunks for the assistant | Module 4. Depends on the chunking decisions made in Module 2 |
 | Outbox table for reliable events | Module 3, when Kafka arrives |
 | Whether an admin may also be a student | Currently allowed. Restrict it with a CHECK if that turns out to be wrong |
