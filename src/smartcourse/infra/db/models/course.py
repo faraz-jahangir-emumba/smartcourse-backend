@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -70,6 +71,28 @@ class Course(UUIDMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
 
+    # Two relationships to the same table, in opposite directions.
+    #
+    # CoursePrerequisite has two foreign keys to courses, so SQLAlchemy cannot
+    # work out which one each relationship should follow - it refuses rather
+    # than guessing. foreign_keys spells it out.
+    #
+    # "what must I finish before taking this course?"
+    prerequisites: Mapped[list["CoursePrerequisite"]] = relationship(
+        back_populates="course",
+        lazy="raise",
+        foreign_keys="CoursePrerequisite.course_id",
+        cascade="all, delete-orphan",
+    )
+
+    # "which courses require this one?" - the reason this course cannot simply
+    # be deleted.
+    required_by: Mapped[list["CoursePrerequisite"]] = relationship(
+        back_populates="prerequisite_course",
+        lazy="raise",
+        foreign_keys="CoursePrerequisite.prerequisite_course_id",
+    )
+
     __table_args__ = (
         CheckConstraint(
             "status IN ('draft', 'publishing', 'ready', 'failed')",
@@ -81,6 +104,72 @@ class Course(UUIDMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<Course {self.title!r} status={self.status}>"
+
+
+class CoursePrerequisite(Base):
+    """Course A requires course B to be completed first. FR-08.
+
+    One row per requirement, so React requiring HTML, CSS and JavaScript is
+    three rows. An array of ids on `courses` would have been simpler to read
+    and much worse: Postgres cannot enforce a foreign key on array *elements*,
+    so deleting a prerequisite course would succeed and leave every course that
+    required it pointing at nothing.
+
+    No UUIDMixin here. The pair of columns is the primary key, which also stops
+    the same prerequisite being added twice - a surrogate id would allow
+    duplicates unless a unique constraint were added anyway.
+    """
+
+    __tablename__ = "course_prerequisites"
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    # RESTRICT, where the column above is CASCADE. Same table, opposite rules.
+    #
+    # Deleting a course should take its own list of requirements with it
+    # (CASCADE), but must not be allowed while other courses depend on it
+    # (RESTRICT) - that would silently change who can enrol on them.
+    prerequisite_course_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("courses.id", ondelete="RESTRICT"),
+        primary_key=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    course: Mapped["Course"] = relationship(
+        back_populates="prerequisites",
+        lazy="raise",
+        foreign_keys=[course_id],
+    )
+    prerequisite_course: Mapped["Course"] = relationship(
+        back_populates="required_by",
+        lazy="raise",
+        foreign_keys=[prerequisite_course_id],
+    )
+
+    __table_args__ = (
+        # A course requiring itself would be permanently unenrollable.
+        #
+        # This catches one hop only. Longer cycles - A needs B, B needs C, C
+        # needs A - are spread across three rows, and a CHECK sees one row at a
+        # time. Those are rejected in the service layer with a recursive query.
+        # FR-08a.
+        CheckConstraint(
+            "course_id <> prerequisite_course_id",
+            name="ck_course_prerequisites_not_self",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<CoursePrerequisite {self.course_id} needs {self.prerequisite_course_id}>"
 
 
 class Module(UUIDMixin, TimestampMixin, Base):

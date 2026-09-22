@@ -10,7 +10,27 @@ One place to keep in step.
 """
 
 from smartcourse.infra.db.base import Base
-from smartcourse.infra.db.models.course import Course, Lesson, Module
+from smartcourse.infra.db.models.content import Asset, Chunk
+from smartcourse.infra.db.models.course import (
+    Course,
+    CoursePrerequisite,
+    Lesson,
+    Module,
+)
+from smartcourse.infra.db.models.enrollment import Enrollment, LessonProgress
+from smartcourse.infra.db.models.event import FailedEvent
 from smartcourse.infra.db.models.user import User
 
-__all__ = ["Base", "Course", "Lesson", "Module", "User"]
+__all__ = [
+    "Asset",
+    "Base",
+    "Chunk",
+    "Course",
+    "CoursePrerequisite",
+    "Enrollment",
+    "FailedEvent",
+    "Lesson",
+    "LessonProgress",
+    "Module",
+    "User",
+]
