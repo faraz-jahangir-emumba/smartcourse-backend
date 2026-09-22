@@ -23,6 +23,21 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # --- security ---------------------------------------------------------
+    # The key every token is signed with. Anyone holding it can mint a token
+    # for any user, so in a real deployment this comes from the environment and
+    # never has a default. The default here is explicitly marked as unsafe so
+    # it cannot be mistaken for a real one.
+    # At least 32 bytes: HMAC-SHA256 is defined for keys of at least its own
+    # output size, and PyJWT warns below that. This default is long enough to
+    # be valid and obviously fake so it cannot be mistaken for a real key.
+    jwt_secret: str = "dev-only-insecure-secret-do-not-use-in-any-real-deployment"
+    jwt_algorithm: str = "HS256"
+
+    # PRD A-01: one hour, no refresh flow. Short because a token cannot be
+    # revoked - it stays valid until it expires, even if the user is deleted.
+    access_token_ttl_minutes: int = 60
+
     # --- postgres ---------------------------------------------------------
     # Defaults match compose.yml, so the app runs with no .env at all.
     # Real deployments override them; there are no secrets here to leak.
