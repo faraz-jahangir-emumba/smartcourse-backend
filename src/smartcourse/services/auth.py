@@ -1,13 +1,13 @@
-"""Registration.
+"""Registration and login.
 
 The use-case layer. One function per thing a person does, with the steps in
-order. No HTTP here: no request, no response, no status codes. The same
-function will be called by tests, by a seed script, and later by background
-workers - none of which have a request.
-"""
+order. No HTTP here - no request, no response, no status codes - and no
+queries either: those live in the repository. What is left reads as the
+business steps themselves.
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+The same functions will be called by tests, by a seed script, and later by
+background workers, none of which have a request.
+"""
 
 from smartcourse.domain.errors import (
     AccountDisabledError,
@@ -16,6 +16,7 @@ from smartcourse.domain.errors import (
     ValidationError,
 )
 from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.repositories import UserRepository
 from smartcourse.infra.security import hash_password, needs_rehash, verify_password
 
 # Roles somebody may give themselves when signing up.
@@ -28,7 +29,7 @@ SELF_ASSIGNABLE_ROLES = ("student", "instructor")
 
 
 async def register_user(
-    session: AsyncSession,
+    users: UserRepository,
     *,
     email: str,
     password: str,
@@ -57,39 +58,31 @@ async def register_user(
             details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
         )
 
-    existing = await session.scalar(select(User).where(User.email == email))
-    if existing is not None:
+    if await users.get_by_email(email) is not None:
         raise ConflictError("That email is already registered.")
 
-    user = User(
-        email=email,
-        password=hash_password(password),
-        full_name=full_name.strip(),
-        # Deduplicated and ordered, so ["student","student"] does not become
-        # two entries and the stored value is predictable.
-        roles=sorted(set(roles)),
+    return await users.add(
+        User(
+            email=email,
+            password=hash_password(password),
+            full_name=full_name.strip(),
+            # Deduplicated and ordered, so ["student","student"] does not
+            # become two entries and the stored value is predictable.
+            roles=sorted(set(roles)),
+        )
     )
-    session.add(user)
-
-    # flush, not commit. This sends the INSERT so the database assigns defaults
-    # and enforces constraints - the caller gets a usable object with its
-    # timestamps - but leaves the transaction open. Whether the work is kept is
-    # the caller's decision, made once when the request ends, not something
-    # each service commits on its own.
-    await session.flush()
-    return user
 
 
 async def authenticate_user(
-    session: AsyncSession, *, email: str, password: str
+    users: UserRepository, *, email: str, password: str
 ) -> User:
     """Check credentials and return the user. FR-01.
 
-    Raises AuthenticationError for a wrong password, an unknown email, or a
-    deactivated account - all with the same message, on purpose.
+    An unknown email and a wrong password fail identically, on purpose. A
+    deactivated account is the one case that gets its own answer.
     """
     email = email.strip().lower()
-    user = await session.scalar(select(User).where(User.email == email))
+    user = await users.get_by_email(email)
 
     if user is None:
         # An unknown email and a wrong password must be indistinguishable.
@@ -113,7 +106,10 @@ async def authenticate_user(
     # have been strengthened since this password was set, upgrade it now -
     # silently, with no password reset needed.
     if needs_rehash(user.password):
+        # No save call needed. `user` is tracked by the session, so changing
+        # the attribute is enough - the commit at the end of the request
+        # flushes it as an UPDATE. An explicit save here would imply
+        # persistence depends on remembering to call it, which it does not.
         user.password = hash_password(password)
-        await session.flush()
 
     return user

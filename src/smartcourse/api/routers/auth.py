@@ -8,7 +8,7 @@ layer down.
 
 from fastapi import APIRouter, status
 
-from smartcourse.api.deps import CurrentUser, SessionDep
+from smartcourse.api.deps import CurrentUser, UserRepo
 from smartcourse.api.schemas.auth import (
     LoginRequest,
     RegisterRequest,
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     status_code=status.HTTP_201_CREATED,
     summary="Create an account",
 )
-async def register(payload: RegisterRequest, session: SessionDep) -> UserResponse:
+async def register(payload: RegisterRequest, users: UserRepo) -> UserResponse:
     """201 Created, and the new user - without the password hash.
 
     Errors are not caught here. A ConflictError from the service becomes a 409
@@ -36,7 +36,7 @@ async def register(payload: RegisterRequest, session: SessionDep) -> UserRespons
     endpoint that might raise one.
     """
     user = await auth_service.register_user(
-        session,
+        users,
         email=payload.email,
         password=payload.password,
         full_name=payload.full_name,
@@ -50,7 +50,7 @@ async def register(payload: RegisterRequest, session: SessionDep) -> UserRespons
     response_model=TokenResponse,
     summary="Exchange credentials for a token",
 )
-async def login(payload: LoginRequest, session: SessionDep) -> TokenResponse:
+async def login(payload: LoginRequest, users: UserRepo) -> TokenResponse:
     """200 with a token, or 401 saying nothing useful to an attacker.
 
     Roles travel in the token, so a permission check needs no extra query. The
@@ -58,7 +58,7 @@ async def login(payload: LoginRequest, session: SessionDep) -> TokenResponse:
     at most an hour.
     """
     user = await auth_service.authenticate_user(
-        session, email=payload.email, password=payload.password
+        users, email=payload.email, password=payload.password
     )
     settings = get_settings()
     return TokenResponse(

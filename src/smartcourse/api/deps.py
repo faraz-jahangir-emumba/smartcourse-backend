@@ -19,10 +19,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.domain.errors import AuthenticationError, PermissionDeniedError
 from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.repositories import UserRepository
 from smartcourse.infra.db.session import get_session
 from smartcourse.infra.security import TokenError, decode_access_token
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+def get_user_repository(session: SessionDep) -> UserRepository:
+    """Build a UserRepository on the request's session.
+
+    Constructed here rather than inside each service, so every repository used
+    during one request shares a transaction. A service that built its own
+    would get a separate one, and two writes in a single request could no
+    longer succeed or fail together.
+    """
+    return UserRepository(session)
+
+
+UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
 
 # Reads the Authorization header and expects `Bearer <token>`.
 #
@@ -33,7 +48,7 @@ _bearer = HTTPBearer(auto_error=False, description="Bearer <token from /auth/log
 
 
 async def get_current_user(
-    session: SessionDep,
+    users: UserRepo,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> User:
     """Who is making this request.
@@ -66,8 +81,12 @@ async def get_current_user(
         # not a valid identity.
         raise AuthenticationError("Invalid or expired token.") from exc
 
-    user = await session.get(User, user_id)
+    user = await users.get_by_id(user_id)
     if user is None or not user.is_active:
+        # A deleted or deactivated account, so the token is simply no longer
+        # valid. 401 rather than the 403 that login gives for a disabled
+        # account: there, the caller had just proved the password. Here the
+        # holder of a token may be anyone.
         raise AuthenticationError("Invalid or expired token.")
 
     return user
