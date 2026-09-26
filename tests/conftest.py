@@ -212,3 +212,20 @@ async def auth_header(client: AsyncClient, email: str) -> dict[str, str]:
     )
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+@pytest.fixture
+async def instructor(client: AsyncClient) -> dict[str, str]:
+    """A registered instructor, and the header that authenticates them.
+
+    Nearly every course test needs one. Written once here; it runs fresh for
+    each test, so no test can see another's instructor.
+    """
+    await register(client, "instructor@example.com", ["instructor"])
+    return await auth_header(client, "instructor@example.com")
+
+
+@pytest.fixture
+async def student(client: AsyncClient) -> dict[str, str]:
+    await register(client, "student@example.com", ["student"])
+    return await auth_header(client, "student@example.com")

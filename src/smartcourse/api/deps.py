@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.domain.errors import AuthenticationError, PermissionDeniedError
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.db.repositories import UserRepository
+from smartcourse.infra.db.repositories import (
+    CourseRepository,
+    LessonRepository,
+    ModuleRepository,
+    UserRepository,
+)
 from smartcourse.infra.db.session import get_session
 from smartcourse.infra.security import TokenError, decode_access_token
 
@@ -38,6 +43,26 @@ def get_user_repository(session: SessionDep) -> UserRepository:
 
 
 UserRepo = Annotated[UserRepository, Depends(get_user_repository)]
+
+
+def get_course_repository(session: SessionDep) -> CourseRepository:
+    return CourseRepository(session)
+
+
+def get_module_repository(session: SessionDep) -> ModuleRepository:
+    return ModuleRepository(session)
+
+
+def get_lesson_repository(session: SessionDep) -> LessonRepository:
+    return LessonRepository(session)
+
+
+# All three resolve to the same session within one request - FastAPI calls
+# each dependency once and reuses the result - so an endpoint touching a
+# course and its modules works in a single transaction.
+CourseRepo = Annotated[CourseRepository, Depends(get_course_repository)]
+ModuleRepo = Annotated[ModuleRepository, Depends(get_module_repository)]
+LessonRepo = Annotated[LessonRepository, Depends(get_lesson_repository)]
 
 # Reads the Authorization header and expects `Bearer <token>`.
 #
