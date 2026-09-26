@@ -9,9 +9,14 @@ workers - none of which have a request.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from smartcourse.domain.errors import ConflictError, ValidationError
+from smartcourse.domain.errors import (
+    AccountDisabledError,
+    AuthenticationError,
+    ConflictError,
+    ValidationError,
+)
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.security import hash_password
+from smartcourse.infra.security import hash_password, needs_rehash, verify_password
 
 # Roles somebody may give themselves when signing up.
 #
@@ -72,4 +77,43 @@ async def register_user(
     # the caller's decision, made once when the request ends, not something
     # each service commits on its own.
     await session.flush()
+    return user
+
+
+async def authenticate_user(
+    session: AsyncSession, *, email: str, password: str
+) -> User:
+    """Check credentials and return the user. FR-01.
+
+    Raises AuthenticationError for a wrong password, an unknown email, or a
+    deactivated account - all with the same message, on purpose.
+    """
+    email = email.strip().lower()
+    user = await session.scalar(select(User).where(User.email == email))
+
+    if user is None:
+        # An unknown email and a wrong password must be indistinguishable.
+        # Otherwise the login form becomes a way to discover which addresses
+        # have accounts, which is the first half of breaking into one.
+        raise AuthenticationError("Incorrect email or password.")
+
+    if not verify_password(user.password, password):
+        raise AuthenticationError("Incorrect email or password.")
+
+    if not user.is_active:
+        # The one place the generic message is dropped, and only because the
+        # caller has already proved the password above. Nothing is concealed
+        # by pretending otherwise - it just sends a real user off to reset a
+        # password that was never the problem. See AccountDisabledError.
+        raise AccountDisabledError(
+            "This account has been deactivated. Contact an administrator."
+        )
+
+    # The one moment the plaintext password exists. If the hashing parameters
+    # have been strengthened since this password was set, upgrade it now -
+    # silently, with no password reset needed.
+    if needs_rehash(user.password):
+        user.password = hash_password(password)
+        await session.flush()
+
     return user

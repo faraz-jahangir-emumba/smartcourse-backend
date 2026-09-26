@@ -36,6 +36,25 @@ class RegisterRequest(BaseModel):
     )
 
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    # No min_length here, deliberately. Validating the length of a password
+    # being *checked* would reject a short one before the credentials are
+    # compared - telling the caller something about the account rather than
+    # simply that the login failed.
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    # "bearer" is the standard scheme name: whoever bears the token may use it.
+    # Clients send it back as `Authorization: Bearer <token>`.
+    token_type: str = "bearer"
+    # Seconds until expiry, so a client can refresh before being rejected
+    # rather than discovering it through a failed request.
+    expires_in: int
+
+
 class UserResponse(BaseModel):
     """A user, as the API describes one.
 

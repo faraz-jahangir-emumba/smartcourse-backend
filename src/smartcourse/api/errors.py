@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartcourse.domain.errors import (
+    AccountDisabledError,
     AuthenticationError,
     ConflictError,
     DomainError,
@@ -30,8 +31,9 @@ from smartcourse.domain.errors import (
 _STATUS_BY_ERROR: dict[type[DomainError], int] = {
     NotFoundError: status.HTTP_404_NOT_FOUND,
     ConflictError: status.HTTP_409_CONFLICT,
-    ValidationError: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    ValidationError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     AuthenticationError: status.HTTP_401_UNAUTHORIZED,
+    AccountDisabledError: status.HTTP_403_FORBIDDEN,
     PermissionDeniedError: status.HTTP_403_FORBIDDEN,
 }
 
@@ -77,7 +79,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return _envelope(
             code="invalid_request",
             message="The request body or parameters are invalid.",
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             details=[
                 {"field": ".".join(str(p) for p in e["loc"][1:]), "problem": e["msg"]}
                 for e in exc.errors()

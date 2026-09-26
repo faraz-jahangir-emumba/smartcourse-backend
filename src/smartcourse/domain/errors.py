@@ -71,6 +71,28 @@ class AuthenticationError(DomainError):
     code = "authentication_failed"
 
 
+class AccountDisabledError(DomainError):
+    """Correct credentials, but the account has been switched off.
+
+    Separate from AuthenticationError on purpose, and the distinction is worth
+    understanding because it is the one place the generic message is dropped.
+
+    An unknown email and a wrong password must be indistinguishable, or the
+    login form becomes a way to discover which addresses are registered. But
+    by the time this is raised the caller has already supplied the correct
+    password - there is nothing left to conceal, and telling them their
+    password is wrong is simply untrue. They retype it, reset it, and
+    eventually contact support about a problem that was never theirs.
+
+    The cost: it confirms to someone credential-stuffing that the pair they
+    tried is valid, which is useful to them elsewhere if the password is
+    reused. Accepted - they cannot get in here, and the alternative misleads
+    a real user on every attempt.
+    """
+
+    code = "account_disabled"
+
+
 class PermissionDeniedError(DomainError):
     """Known who they are; they are not allowed to do this."""
 

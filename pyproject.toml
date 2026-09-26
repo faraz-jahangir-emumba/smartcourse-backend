@@ -25,3 +25,20 @@ smartcourse = "smartcourse:main"
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+# Lets async test functions run without decorating every one of them.
+asyncio_mode = "auto"
+# Puts the project root on sys.path, so tests can import `tests.conftest`
+# for shared helpers. Without it pytest only adds the rootdir when tests/ is a
+# package, which would mean an otherwise pointless __init__.py.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
