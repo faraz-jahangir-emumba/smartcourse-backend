@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from smartcourse.api.errors import register_exception_handlers
-from smartcourse.api.routers import auth, courses
+from smartcourse.api.routers import auth, courses, users
 from smartcourse.infra.db.session import dispose_engine
 
 @asynccontextmanager
@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
     api_v1 = APIRouter(prefix="/api/v1")
     api_v1.include_router(auth.router)
     api_v1.include_router(courses.router)
+    api_v1.include_router(users.router)
     app.include_router(api_v1)
 
     @app.get("/health", tags=["health"])

@@ -8,7 +8,7 @@ layer down.
 
 from fastapi import APIRouter, status
 
-from smartcourse.api.deps import CurrentUser, UserRepo
+from smartcourse.api.deps import UserRepo
 from smartcourse.api.schemas.auth import (
     LoginRequest,
     RegisterRequest,
@@ -64,17 +64,5 @@ async def login(payload: LoginRequest, users: UserRepo) -> TokenResponse:
     return TokenResponse(
         access_token=create_access_token(user.id, user.roles),
         expires_in=settings.access_token_ttl_minutes * 60,
+        user=UserResponse.model_validate(user),
     )
-
-
-@router.get(
-    "/me",
-    response_model=UserResponse,
-    summary="The account this token belongs to",
-)
-async def me(user: CurrentUser) -> UserResponse:
-    """Lets a client confirm a token is still good, and read its own roles.
-
-    Also the smallest possible check that authentication works end to end.
-    """
-    return UserResponse.model_validate(user)

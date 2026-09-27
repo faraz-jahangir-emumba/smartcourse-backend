@@ -113,3 +113,55 @@ async def authenticate_user(
         user.password = hash_password(password)
 
     return user
+
+
+async def update_profile(
+    users: UserRepository,
+    *,
+    user: User,
+    full_name: str | None = None,
+    email: str | None = None,
+    roles: list[str] | None = None,
+) -> User:
+    """Change your own profile. FR-03a, UC-07.
+
+    Only the fields that were sent. `None` means "not mentioned", so an
+    omitted field keeps its value.
+
+    The roles part is what UC-07 needs: an instructor who wants to learn adds
+    the student role to the account they already have, rather than keeping a
+    second one.
+    """
+    if email is not None:
+        # Email is the login identifier, so changing it changes who you are to
+        # this system. Refusing loudly rather than quietly dropping the field
+        # keeps a caller from getting a cheerful 200 and believing it worked.
+        #
+        # There is a real gap behind this: nobody can fix a mistyped address,
+        # because there is no admin user endpoint either. Recorded in STATE.md.
+        raise ValidationError("Email cannot be changed.")
+
+    if full_name is not None:
+        user.full_name = full_name.strip()
+
+    if roles is not None:
+        if not roles:
+            raise ValidationError("At least one role is required.")
+
+        invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
+        if invalid:
+            # Same rule as registration: admin is granted, never claimed.
+            # Allowing it here would simply move the hole rather than close
+            # it - register as a student, then promote yourself.
+            raise ValidationError(
+                f"Cannot self-assign: {', '.join(invalid)}.",
+                details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
+            )
+
+        # Dropping `instructor` while still owning courses is allowed. The
+        # courses stay theirs and simply cannot be edited until they take the
+        # role back - blocking it would put a rule about course ownership
+        # inside a user endpoint.
+        user.roles = sorted(set(roles))
+
+    return user

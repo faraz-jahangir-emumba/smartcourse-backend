@@ -89,7 +89,7 @@ uv run alembic upgrade head
 uv run uvicorn smartcourse.main:create_app --factory --reload
 ```
 
-Then open **<http://localhost:8000/docs>**.
+Then open **<http://localhost:8000/docs>** OR **<http://localhost:8000/redoc>**.
 
 > **On a network that intercepts TLS**, `uv` fails with
 > `invalid peer certificate: UnknownIssuer`. Set `UV_SYSTEM_CERTS=1` so it
@@ -104,20 +104,42 @@ is generated from the code, so it cannot go stale — including which fields are
 required and what each one validates. Click **Schema** rather than **Example
 Value** to see required fields marked.
 
-### Authentication
+### Authentication and accounts
 
 | | | Who |
 |---|---|---|
 | `POST` | `/auth/register` | anyone |
 | `POST` | `/auth/login` | anyone |
-| `GET` | `/auth/me` | any signed-in user |
+| `GET` | `/users/me` | any signed-in user |
+| `PATCH` | `/users/me` | any signed-in user |
+
+`/auth` is for proving who you are. `/users/me` is the account itself — a
+thing you read and change — so it lives under its own prefix.
 
 Login returns a bearer token lasting one hour, sent back as
-`Authorization: Bearer <token>`.
+`Authorization: Bearer <token>`, together with the user it belongs to. The
+user is already loaded to check the password, so returning it saves every
+client an immediate second call.
 
 Registration accepts `student` and `instructor`. **Admin cannot be
 self-assigned** — a public endpoint where the caller picks their own role
-would let anyone become an admin by editing one field.
+would let anyone become an admin by editing one field. The same rule applies
+to `PATCH /users/me`, or the hole would simply move: register as a student,
+then promote yourself.
+
+`PATCH /users/me` changes your name or your roles. Adding `student` to an
+instructor account is UC-07 — an instructor who wants to learn keeps one
+account rather than opening a second.
+
+**Email cannot be changed**, and sending one returns `422` rather than being
+quietly ignored, so a caller is never told a change worked when it did not.
+Email is the login identifier: changing it changes who you are to the system.
+The consequence is that a mistyped address cannot be repaired by anyone —
+there is no admin user endpoint either. That is a known gap, not an oversight.
+
+Password changes have no endpoint yet. Changing one has to prove you know the
+current password, or anybody holding a stolen token could lock the real owner
+out permanently — which is its own input, its own rules and its own tests.
 
 ### Courses, modules and lessons
 

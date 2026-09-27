@@ -45,22 +45,15 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    # "bearer" is the standard scheme name: whoever bears the token may use it.
-    # Clients send it back as `Authorization: Bearer <token>`.
-    token_type: str = "bearer"
-    # Seconds until expiry, so a client can refresh before being rejected
-    # rather than discovering it through a failed request.
-    expires_in: int
-
-
 class UserResponse(BaseModel):
     """A user, as the API describes one.
 
     Note what is absent: the password hash. It is not omitted by remembering to
     leave it out - it is absent because this class lists what exists. Returning
     the model itself is what leaks; listing fields is what prevents it.
+
+    Defined above TokenResponse because that one embeds it, and a class cannot
+    reference a name defined further down the file.
     """
 
     # Lets FastAPI build this straight from a SQLAlchemy object by reading
@@ -73,3 +66,50 @@ class UserResponse(BaseModel):
     roles: list[str]
     is_active: bool
     created_at: datetime
+
+
+class UserUpdate(BaseModel):
+    """Changing your own profile. Every field optional.
+
+    Omitting a field leaves it alone - that is what PATCH means, and it is
+    why a name cannot be wiped by a request that simply did not mention it.
+
+    Password is deliberately absent. Changing one has to prove you know the
+    current one, or anybody holding a stolen token could lock the real owner
+    out permanently. That needs its own endpoint and its own input.
+
+    is_active is absent too. Deactivating yourself is closing an account, not
+    editing a field - and it is one-way, since an inactive user cannot log in
+    to undo it.
+
+    email is listed but always refused, which is deliberate. Silently dropping
+    it would hand the caller a 200 and no hint that nothing changed; listing
+    it and answering 422 tells them why. The field exists to carry that
+    message, not to be accepted.
+    """
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=200)
+    email: EmailStr | None = Field(
+        default=None,
+        description="Rejected with 422. Email is the login identifier.",
+    )
+    roles: list[str] | None = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    # "bearer" is the standard scheme name: whoever bears the token may use it.
+    # Clients send it back as `Authorization: Bearer <token>`.
+    token_type: str = "bearer"
+    # Seconds until expiry, so a client can refresh before being rejected
+    # rather than discovering it through a failed request.
+    expires_in: int
+    # The account that just signed in.
+    #
+    # Login has already loaded this user to check the password, so returning
+    # it costs nothing and saves the client an immediate second call to find
+    # out who it is and what they may do.
+    #
+    # /auth/me still exists and is not redundant: it answers the same question
+    # later, from a stored token, when the app reopens.
+    user: UserResponse

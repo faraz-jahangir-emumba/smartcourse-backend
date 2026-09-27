@@ -161,31 +161,31 @@ async def test_wrong_password_and_unknown_email_are_indistinguishable(
     assert wrong_password.json() == unknown_email.json()
 
 
-async def test_me_returns_the_token_holder(client: AsyncClient) -> None:
+async def test_users_me_returns_the_token_holder(client: AsyncClient) -> None:
     await register(client, "whoami@example.com", ["instructor"])
     headers = await auth_header(client, "whoami@example.com")
 
-    response = await client.get("/auth/me", headers=headers)
+    response = await client.get("/users/me", headers=headers)
 
     assert response.status_code == 200
     assert response.json()["email"] == "whoami@example.com"
     assert response.json()["roles"] == ["instructor"]
 
 
-async def test_me_without_a_token_is_rejected(client: AsyncClient) -> None:
-    response = await client.get("/auth/me")
+async def test_users_me_without_a_token_is_rejected(client: AsyncClient) -> None:
+    response = await client.get("/users/me")
 
     assert response.status_code == 401
 
 
-async def test_me_with_a_tampered_token_is_rejected(client: AsyncClient) -> None:
+async def test_users_me_with_a_tampered_token_is_rejected(client: AsyncClient) -> None:
     """Changing the payload breaks the signature, which is the whole basis of
     trusting a token whose contents anyone can read."""
     await register(client, "tamper@example.com")
     headers = await auth_header(client, "tamper@example.com")
     headers["Authorization"] = headers["Authorization"][:-4] + "AAAA"
 
-    response = await client.get("/auth/me", headers=headers)
+    response = await client.get("/users/me", headers=headers)
 
     assert response.status_code == 401
 
@@ -240,3 +240,128 @@ async def test_disabled_account_still_fails_generically_on_a_wrong_password(
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "authentication_failed"
+
+
+async def test_login_returns_the_user_alongside_the_token(
+    client: AsyncClient,
+) -> None:
+    """Login has already loaded the user to check the password, so returning
+    it saves the client an immediate second call to /auth/me.
+
+    And the same rule as everywhere else: no password hash."""
+    await register(client, "withuser@example.com", ["instructor"])
+
+    response = await client.post(
+        "/auth/login", json={"email": "withuser@example.com", "password": PASSWORD}
+    )
+
+    assert response.status_code == 200
+    user = response.json()["user"]
+    assert user["email"] == "withuser@example.com"
+    assert user["roles"] == ["instructor"]
+    assert "password" not in user
+
+
+# --- editing your own profile --- FR-03a, UC-07 ---------------------------
+
+
+async def test_patch_only_changes_what_was_sent(client: AsyncClient) -> None:
+    """An omitted field keeps its value - that is what PATCH means."""
+    await register(client, "edit@example.com", ["student"])
+    headers = await auth_header(client, "edit@example.com")
+
+    response = await client.patch(
+        "/users/me", json={"full_name": "New Name"}, headers=headers
+    )
+
+    assert response.status_code == 200
+    assert response.json()["full_name"] == "New Name"
+    assert response.json()["email"] == "edit@example.com"  # untouched
+    assert response.json()["roles"] == ["student"]         # untouched
+
+
+async def test_an_instructor_can_become_a_student_too(
+    client: AsyncClient,
+) -> None:
+    """UC-07. One account gaining a role, not a second account."""
+    await register(client, "teach@example.com", ["instructor"])
+    headers = await auth_header(client, "teach@example.com")
+
+    response = await client.patch(
+        "/users/me",
+        json={"roles": ["instructor", "student"]},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["roles"] == ["instructor", "student"]
+
+
+async def test_admin_still_cannot_be_self_assigned(client: AsyncClient) -> None:
+    """Allowing it here would move the hole rather than close it: register as
+    a student, then promote yourself."""
+    await register(client, "climber@example.com", ["student"])
+    headers = await auth_header(client, "climber@example.com")
+
+    response = await client.patch(
+        "/users/me", json={"roles": ["admin"]}, headers=headers
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["allowed"] == [
+        "student",
+        "instructor",
+    ]
+
+
+async def test_email_cannot_be_changed(client: AsyncClient) -> None:
+    """Refused rather than ignored, so the caller is not told it worked."""
+    await register(client, "fixed@example.com")
+    headers = await auth_header(client, "fixed@example.com")
+
+    response = await client.patch(
+        "/users/me", json={"email": "new@example.com"}, headers=headers
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "Email cannot be changed."
+
+
+async def test_a_rejected_email_leaves_the_rest_of_the_request_alone(
+    client: AsyncClient,
+) -> None:
+    """The refusal has to happen before anything is written.
+
+    Otherwise a request carrying both fields would half-succeed: the name
+    changed, the call returned 422, and the caller has no way to know which
+    part landed.
+    """
+    await register(client, "both@example.com")
+    headers = await auth_header(client, "both@example.com")
+
+    response = await client.patch(
+        "/users/me",
+        json={"full_name": "New Name", "email": "new@example.com"},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+    after = await client.get("/users/me", headers=headers)
+    assert after.json()["full_name"] != "New Name"
+    assert after.json()["email"] == "both@example.com"
+
+
+async def test_empty_roles_are_rejected(client: AsyncClient) -> None:
+    """A user with no roles could do nothing and should not exist."""
+    await register(client, "noroles@example.com")
+    headers = await auth_header(client, "noroles@example.com")
+
+    response = await client.patch("/users/me", json={"roles": []}, headers=headers)
+
+    assert response.status_code == 422
+
+
+async def test_editing_a_profile_requires_a_token(client: AsyncClient) -> None:
+    response = await client.patch("/users/me", json={"full_name": "Nobody"})
+
+    assert response.status_code == 401
