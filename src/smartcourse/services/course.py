@@ -42,26 +42,48 @@ EDITABLE_STATUSES = ("draft", "failed")
 
 
 def _assert_can_edit(course: Course, user: User) -> None:
-    """The owner, or an admin. Nobody else."""
+    """The owner, or an admin. Nobody else.
+
+    Which refusal depends on whether they could see the course at all, so
+    editing stays consistent with reading:
+
+        cannot see it (someone else's draft)  -> 404, same as a read
+        can see it but does not own it        -> 403
+
+    A blanket 404 would be confusing for a published course - it is in the
+    catalogue, so claiming it does not exist contradicts the screen they just
+    came from. A blanket 403 would leak the existence of drafts that the read
+    endpoints deliberately hide.
+    """
     if "admin" in user.roles:
         return
-    if course.instructor_id != user.id:
-        # 403 rather than 404. A published course is public, so hiding its
-        # existence achieves nothing; saying plainly that it is not yours is
-        # more useful than pretending it is missing.
+    if course.instructor_id == user.id:
+        return
+
+    if _can_view(course, user):
         raise PermissionDeniedError("This course belongs to another instructor.")
+    raise NotFoundError("No course with that id.")
 
 
 def _can_view(course: Course, user: User) -> bool:
     """Whether this course is visible to this caller.
 
     The single-course counterpart of the visibility filter in list_courses.
-    Both express the same rule; keeping them consistent matters, because a
-    filtered list with an unfiltered detail endpoint is not a rule at all.
+    Both express the same rule, and they have to: a filtered list with a
+    detail endpoint that disagrees is not a rule at all, just a suggestion
+    that anyone holding an id can ignore.
+
+    Unpublished work needs *both* ownership and the instructor role. Owning a
+    course is not enough on its own - someone who has given up the instructor
+    role is no longer working on it, and their drafts go out of sight until
+    they take the role back. Nothing is lost: the courses remain theirs and
+    reappear the moment the role does.
     """
     if course.status == "ready":
         return True
-    return "admin" in user.roles or course.instructor_id == user.id
+    if "admin" in user.roles:
+        return True
+    return course.instructor_id == user.id and "instructor" in user.roles
 
 
 def _assert_editable(course: Course) -> None:

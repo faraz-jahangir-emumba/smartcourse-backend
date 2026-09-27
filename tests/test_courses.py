@@ -53,15 +53,19 @@ async def test_anonymous_cannot_create_a_course(client: AsyncClient) -> None:
     assert response.status_code == 401
 
 
-async def test_instructor_cannot_edit_another_instructors_course(
-    client: AsyncClient, instructor: dict
+async def test_editing_a_published_course_you_do_not_own_is_403(
+    client: AsyncClient, instructor: dict, session: AsyncSession
 ) -> None:
     """Role gets you through the door; ownership decides which course.
+
+    403 because the course is published - it is in the catalogue, so claiming
+    it does not exist would contradict the screen they came from.
 
     Enforced in the service rather than the route, because it must hold for
     callers that never touch a route.
     """
     course_id = await _make_course(client, instructor)
+    await _publish(session, course_id)
     await register(client, "rival@example.com", ["instructor"])
     rival = await auth_header(client, "rival@example.com")
 
@@ -70,6 +74,22 @@ async def test_instructor_cannot_edit_another_instructors_course(
     )
 
     assert response.status_code == 403
+
+
+async def test_editing_a_draft_you_cannot_see_is_404(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """404, not 403 - the rival cannot see this course at all, and a 403
+    would confirm it exists. Editing follows the same rule as reading."""
+    course_id = await _make_course(client, instructor)
+    await register(client, "rival3@example.com", ["instructor"])
+    rival = await auth_header(client, "rival3@example.com")
+
+    response = await client.patch(
+        f"/courses/{course_id}", json={"title": "Hijacked"}, headers=rival
+    )
+
+    assert response.status_code == 404
 
 
 async def test_student_can_read_published_courses(
@@ -550,3 +570,53 @@ async def test_student_can_read_a_lesson_once_published(
 
     assert response.status_code == 200
     assert response.json()["content"] == "hello"
+
+
+async def test_dropping_the_instructor_role_hides_your_own_drafts(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """Unpublished work needs both ownership and the role.
+
+    The listing already worked this way; the detail endpoint did not, so a
+    former instructor could still read their drafts by id. The two rules have
+    to agree, or the filtered list is only a suggestion.
+    """
+    course_id = await _make_course(client, instructor)
+
+    # still an instructor: visible
+    assert (
+        await client.get(f"/courses/{course_id}", headers=instructor)
+    ).status_code == 200
+
+    # give up the role
+    dropped = await client.patch(
+        "/users/me", json={"roles": ["student"]}, headers=instructor
+    )
+    assert dropped.status_code == 200
+    assert dropped.json()["roles"] == ["student"]
+
+    # the token still says instructor, so fetch a new one
+    now_student = await auth_header(client, "instructor@example.com")
+
+    by_id = await client.get(f"/courses/{course_id}", headers=now_student)
+    listed = await client.get("/courses", headers=now_student)
+
+    assert by_id.status_code == 404
+    assert listed.json()["total"] == 0
+
+
+async def test_the_course_returns_when_the_role_does(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """Nothing is lost by dropping the role - the course stays theirs."""
+    course_id = await _make_course(client, instructor)
+    await client.patch("/users/me", json={"roles": ["student"]}, headers=instructor)
+    await client.patch(
+        "/users/me",
+        json={"roles": ["instructor"]},
+        headers=await auth_header(client, "instructor@example.com"),
+    )
+
+    back = await auth_header(client, "instructor@example.com")
+
+    assert (await client.get(f"/courses/{course_id}", headers=back)).status_code == 200
