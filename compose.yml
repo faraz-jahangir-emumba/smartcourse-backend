@@ -1,0 +1,53 @@
+# Describes the servers SmartCourse needs, so anyone can start them with one
+# command instead of installing each by hand.
+#
+# Right now that is only Postgres. Mongo, Redis, Kafka, RabbitMQ and Temporal
+# get added in later modules, as each one is actually needed.
+
+# A name for this group of containers. Without it, Docker uses the folder name
+# ("educorp"), which would not match the project.
+name: smartcourse
+
+services:
+  # "postgres" is the name of this service. It is also the hostname other
+  # containers would use to reach it later.
+  postgres:
+    # The exact image to download and run. postgres:16 is the official image.
+    # Pinning 16 rather than "latest" means it stays the same version tomorrow.
+    image: postgres:16
+
+    # If the container stops - a crash, or a machine restart - start it again.
+    restart: unless-stopped
+
+    # Settings the Postgres image reads on first start. These create the
+    # database and the user your app will log in as.
+    environment:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+
+    # "host:container". The database listens on 5432 inside the container;
+    # this makes it reachable at localhost:5432 on Windows too.
+    # Without this line the container runs, but nothing outside can reach it.
+    ports:
+      - "5432:5432"
+
+    # Where the data actually lives.
+    # A container's own filesystem is thrown away when it is removed. A volume
+    # is storage that outlives the container, so your tables survive a restart.
+    # Left out, every `docker compose down` would wipe the database.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    # How Docker knows Postgres is not just running, but ready to accept
+    # connections. There is a gap of a few seconds between the two, and things
+    # that connect during that gap fail. Later services will wait on this.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smartcourse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+# Declares the volume used above. Docker manages where it physically sits.
+volumes:
+  postgres-data:
