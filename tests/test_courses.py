@@ -1,6 +1,6 @@
 """Course, module and lesson management. FR-03, FR-04, FR-05."""
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -620,3 +620,170 @@ async def test_the_course_returns_when_the_role_does(
     back = await auth_header(client, "instructor@example.com")
 
     assert (await client.get(f"/courses/{course_id}", headers=back)).status_code == 200
+
+
+# --- prerequisites, FR-08 --------------------------------------------------
+
+
+async def test_prerequisites_can_be_set_on_create(
+    client: AsyncClient, instructor: dict
+) -> None:
+    basics = await _make_course(client, instructor, title="Python Basics")
+
+    response = await client.post(
+        "/courses",
+        json={"title": "Advanced", "prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+    assert response.status_code == 201
+
+    detail = await client.get(f"/courses/{response.json()['id']}", headers=instructor)
+    assert detail.json()["prerequisites"] == [
+        {"id": basics, "title": "Python Basics"}
+    ]
+
+
+async def test_updating_replaces_the_whole_set(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The complete list, every time - the same rule as module_order."""
+    first = await _make_course(client, instructor, title="First")
+    second = await _make_course(client, instructor, title="Second")
+    advanced = await _make_course(client, instructor, title="Advanced")
+
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [first]},
+        headers=instructor,
+    )
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [second]},
+        headers=instructor,
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    titles = [p["title"] for p in detail.json()["prerequisites"]]
+    assert titles == ["Second"]
+
+
+async def test_an_empty_list_clears_prerequisites(
+    client: AsyncClient, instructor: dict
+) -> None:
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+
+    await client.patch(
+        f"/courses/{advanced}", json={"prerequisite_ids": []}, headers=instructor
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    assert detail.json()["prerequisites"] == []
+
+
+async def test_omitting_the_field_leaves_prerequisites_alone(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The difference between "no prerequisites" and "I was not talking about
+    prerequisites"."""
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+
+    await client.patch(
+        f"/courses/{advanced}", json={"title": "Renamed"}, headers=instructor
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    assert len(detail.json()["prerequisites"]) == 1
+
+
+async def test_an_unknown_prerequisite_is_rejected(
+    client: AsyncClient, instructor: dict
+) -> None:
+    advanced = await _make_course(client, instructor, title="Advanced")
+    ghost = str(uuid4())
+
+    response = await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [ghost]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["unknown"] == [ghost]
+
+
+async def test_a_course_cannot_require_itself(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The database has a CHECK for this. The service checks too, so the
+    instructor gets a sentence rather than a constraint violation."""
+    advanced = await _make_course(client, instructor, title="Advanced")
+
+    response = await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [advanced]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert "its own prerequisite" in response.json()["error"]["message"]
+
+
+async def test_two_courses_cannot_require_each_other(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """A loop makes both courses permanently unenrollable, and does it
+    silently - nothing errors, students just can never get in."""
+    first = await _make_course(client, instructor, title="First")
+    second = await _make_course(client, instructor, title="Second")
+    await client.patch(
+        f"/courses/{second}",
+        json={"prerequisite_ids": [first]},
+        headers=instructor,
+    )
+
+    response = await client.patch(
+        f"/courses/{first}",
+        json={"prerequisite_ids": [second]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["conflicts_with"] == "Second"
+
+
+async def test_prerequisites_set_through_the_api_block_enrollment(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """The whole loop, end to end: an instructor sets a prerequisite through
+    the API and a student is refused by it.
+
+    Until this existed, FR-08 was enforced against rows nothing could create.
+    """
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+    await _publish(session, basics)
+    await _publish(session, advanced)
+
+    response = await client.post(
+        f"/courses/{advanced}/enrollments/enroll", headers=student
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["details"]["missing"] == ["Python Basics"]

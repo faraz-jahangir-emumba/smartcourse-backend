@@ -77,12 +77,30 @@ class Course(UUIDMixin, TimestampMixin, Base):
     # work out which one each relationship should follow - it refuses rather
     # than guessing. foreign_keys spells it out.
     #
-    # "what must I finish before taking this course?"
-    prerequisites: Mapped[list["CoursePrerequisite"]] = relationship(
+    # The link rows themselves - "what must I finish before taking this
+    # course?" Named _links because the thing most code actually wants is the
+    # courses, not the join rows, and that name should belong to the useful one.
+    prerequisite_links: Mapped[list["CoursePrerequisite"]] = relationship(
         back_populates="course",
         lazy="raise",
         foreign_keys="CoursePrerequisite.course_id",
         cascade="all, delete-orphan",
+    )
+
+    # The same thing, as courses, reading straight through the join table.
+    #
+    # viewonly because there are now two ways to see one set of rows, and
+    # letting both write them means two sources of truth about the same data.
+    # Writing goes through CourseRepository.replace_prerequisites; this is for
+    # reading, which is what an API response needs.
+    prerequisites: Mapped[list["Course"]] = relationship(
+        "Course",
+        secondary="course_prerequisites",
+        primaryjoin="Course.id == CoursePrerequisite.course_id",
+        secondaryjoin="Course.id == CoursePrerequisite.prerequisite_course_id",
+        viewonly=True,
+        lazy="raise",
+        order_by="Course.title",
     )
 
     # "which courses require this one?" - the reason this course cannot simply
@@ -145,7 +163,7 @@ class CoursePrerequisite(Base):
     )
 
     course: Mapped["Course"] = relationship(
-        back_populates="prerequisites",
+        back_populates="prerequisite_links",
         lazy="raise",
         foreign_keys=[course_id],
     )

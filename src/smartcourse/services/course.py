@@ -149,13 +149,14 @@ async def create_course(
     title: str,
     description: str | None,
     capacity: int | None,
+    prerequisite_ids: list[UUID] | None = None,
 ) -> Course:
     """Create a draft course owned by this instructor. FR-04.
 
     Status is not a parameter. A course always starts as a draft - you
     publish it later, and the status follows from how that goes.
     """
-    return await courses.add(
+    course = await courses.add(
         Course(
             instructor_id=instructor.id,
             title=title.strip(),
@@ -164,6 +165,11 @@ async def create_course(
             status="draft",
         )
     )
+
+    if prerequisite_ids is not None:
+        await _set_prerequisites(courses, course=course, ids=prerequisite_ids)
+
+    return course
 
 
 async def list_courses(
@@ -322,6 +328,7 @@ async def update_course(
     description: str | None = None,
     capacity: int | None = None,
     module_order: list[UUID] | None = None,
+    prerequisite_ids: list[UUID] | None = None,
 ) -> Course:
     """Change a course. Only the fields that were sent.
 
@@ -344,7 +351,57 @@ async def update_course(
         _reposition(existing, module_order, "module_order")
         await modules.flush()
 
+    # An empty list clears them; an omitted field leaves them alone. That is
+    # the difference between "this course has no prerequisites" and "I was
+    # not talking about prerequisites".
+    if prerequisite_ids is not None:
+        await _set_prerequisites(courses, course=course, ids=prerequisite_ids)
+
     return course
+
+
+async def _set_prerequisites(
+    courses: CourseRepository, *, course: Course, ids: list[UUID]
+) -> None:
+    """Replace a course's prerequisites. FR-08.
+
+    Three refusals, each for a different kind of mistake.
+    """
+    wanted = set(ids)
+
+    if course.id in wanted:
+        # The database has CHECK (course_id <> prerequisite_course_id), so
+        # this is already impossible. The check is here for the message - a
+        # constraint violation tells the instructor nothing useful.
+        raise ValidationError("A course cannot be its own prerequisite.")
+
+    missing = wanted - await courses.existing_ids(wanted)
+    if missing:
+        raise ValidationError(
+            "Some of those courses do not exist.",
+            details={"unknown": sorted(str(i) for i in missing)},
+        )
+
+    # One hop only, and that is a deliberate limit.
+    #
+    # If B already requires A, then A requiring B closes a loop and both
+    # become permanently unenrollable - silently, because nothing errors.
+    # Students simply can never get in.
+    #
+    # Longer chains - A needs B, B needs C, C needs A - are not caught. That
+    # is FR-08a, which needs a recursive walk of the whole graph, and which
+    # was dropped from Module 2 on 8 October because nothing in the brief
+    # asks for it. A two-course loop is something an instructor does by
+    # accident; a three-course loop takes real determination. See STATE.md.
+    for candidate in wanted:
+        if course.id in await courses.requires(candidate):
+            titles = await courses.titles_for({candidate})
+            raise ValidationError(
+                "That would make two courses require each other.",
+                details={"conflicts_with": titles.get(candidate, str(candidate))},
+            )
+
+    await courses.replace_prerequisites(course.id, list(wanted))
 
 
 async def delete_course(

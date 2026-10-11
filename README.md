@@ -159,6 +159,27 @@ out permanently — which is its own input, its own rules and its own tests.
 | `PATCH` | `/lessons/{id}` | the owning instructor |
 | `DELETE` | `/lessons/{id}` | the owning instructor |
 
+**Prerequisites** are set on the course, as the complete list:
+
+```
+PATCH /courses/{id}
+{ "prerequisite_ids": ["<course-id>", "..."] }
+```
+
+The whole set every time, like `module_order`. "Add one" would need a
+matching "remove one", and then the two can disagree about what the set
+currently is. An empty list clears them; omitting the field leaves them
+alone.
+
+Three refusals, all `422`: a course that does not exist, a course requiring
+itself, and two courses requiring each other. That last one matters because a
+loop makes both courses permanently unenrollable *silently* — nothing errors,
+students simply can never get in.
+
+Longer chains — A needs B, B needs C, C needs A — are **not** caught. That is
+FR-08a, which needs a recursive walk of the whole graph and is deferred. A
+two-course loop is an accident; a three-course loop takes determination.
+
 ### Enrollment
 
 | | | Who |

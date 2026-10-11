@@ -71,12 +71,29 @@ class ModuleDetailResponse(ModuleResponse):
     lessons: list[LessonResponse]
 
 
+class CourseSummary(BaseModel):
+    """A course named, not described. Used where one course refers to
+    another and the full object would be noise."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+
+
 class CourseCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str | None = None
     # Null means unlimited, which is a different thing from 0, which would
     # mean full. Two meanings need two values.
     capacity: int | None = Field(default=None, gt=0)
+    # Courses that must be finished first. FR-08.
+    #
+    # The complete list, every time - the same rule as module_order. "Add
+    # this one" would need a matching "remove this one", and then two
+    # endpoints can disagree about what the set currently is. Sending the
+    # whole set removes the question and makes the call idempotent.
+    prerequisite_ids: list[UUID] | None = None
 
 
 class CourseUpdate(BaseModel):
@@ -84,6 +101,10 @@ class CourseUpdate(BaseModel):
     description: str | None = None
     capacity: int | None = Field(default=None, gt=0)
     module_order: list[UUID] | None = None
+    # Replaces the set. An empty list clears it; omitting the field leaves it
+    # alone - which is the difference between "no prerequisites" and "I was
+    # not talking about prerequisites".
+    prerequisite_ids: list[UUID] | None = None
 
 
 class CourseResponse(BaseModel):
@@ -110,6 +131,14 @@ class CourseDetailResponse(CourseResponse):
     """
 
     modules: list[ModuleDetailResponse]
+    # Titles, not bare ids. A student needs to know what a course requires
+    # before being refused by it, and ids alone would mean fetching each one
+    # just to render "requires Python Basics".
+    #
+    # On the detail view only. Putting it on CourseResponse would mean
+    # loading prerequisites for every course in a listing, which is a lot of
+    # work for something nobody reads until they open one.
+    prerequisites: list[CourseSummary] = []
 
 
 class CourseListResponse(BaseModel):

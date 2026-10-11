@@ -64,6 +64,7 @@ async def create_course(
         title=payload.title,
         description=payload.description,
         capacity=payload.capacity,
+        prerequisite_ids=payload.prerequisite_ids,
     )
     return CourseResponse.model_validate(course)
 
@@ -131,6 +132,7 @@ async def update_course(
         description=payload.description,
         capacity=payload.capacity,
         module_order=payload.module_order,
+        prerequisite_ids=payload.prerequisite_ids,
     )
     return CourseResponse.model_validate(course)
 

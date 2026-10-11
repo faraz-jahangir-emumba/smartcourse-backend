@@ -11,7 +11,7 @@ live in the service, because they are business rules.
 
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -44,7 +44,10 @@ class CourseRepository:
         return await self._session.scalar(
             select(Course)
             .where(Course.id == course_id)
-            .options(selectinload(Course.modules).selectinload(Module.lessons))
+            .options(
+                selectinload(Course.modules).selectinload(Module.lessons),
+                selectinload(Course.prerequisites),
+            )
         )
 
     async def prerequisite_ids(self, course_id: UUID) -> set[UUID]:
@@ -63,6 +66,54 @@ class CourseRepository:
             )
         )
         return set(rows)
+
+    async def replace_prerequisites(
+        self, course_id: UUID, prerequisite_ids: list[UUID]
+    ) -> None:
+        """Set the complete list. FR-08.
+
+        Replace rather than append, for the same reason module_order sends
+        the whole order: "add one" needs a matching "remove one", and then
+        two endpoints can disagree about what the set currently is. Sending
+        the set makes the call idempotent - run it twice, same result.
+
+        Delete-then-insert rather than working out a diff. The set is a
+        handful of rows, the table carries no data of its own beyond the two
+        ids, and a diff would be more code to get subtly wrong for no gain.
+        """
+        await self._session.execute(
+            delete(CoursePrerequisite).where(
+                CoursePrerequisite.course_id == course_id
+            )
+        )
+        for prerequisite_id in dict.fromkeys(prerequisite_ids):
+            self._session.add(
+                CoursePrerequisite(
+                    course_id=course_id, prerequisite_course_id=prerequisite_id
+                )
+            )
+        await self._session.flush()
+
+    async def existing_ids(self, course_ids: set[UUID]) -> set[UUID]:
+        """Which of these courses actually exist.
+
+        One query rather than one per id, so naming twenty missing courses
+        costs the same as naming one.
+        """
+        if not course_ids:
+            return set()
+        rows = await self._session.scalars(
+            select(Course.id).where(Course.id.in_(course_ids))
+        )
+        return set(rows)
+
+    async def requires(self, course_id: UUID) -> set[UUID]:
+        """What this course lists as its own prerequisites.
+
+        Same query as prerequisite_ids, named for the question the cycle
+        check asks rather than the one enrollment asks.
+        """
+        return await self.prerequisite_ids(course_id)
 
     async def titles_for(self, course_ids: set[UUID]) -> dict[UUID, str]:
         """Names for a set of ids, in one query.
