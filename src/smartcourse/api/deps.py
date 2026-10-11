@@ -21,6 +21,7 @@ from smartcourse.domain.errors import AuthenticationError, PermissionDeniedError
 from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import (
     CourseRepository,
+    EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
     UserRepository,
@@ -57,12 +58,21 @@ def get_lesson_repository(session: SessionDep) -> LessonRepository:
     return LessonRepository(session)
 
 
-# All three resolve to the same session within one request - FastAPI calls
+def get_enrollment_repository(session: SessionDep) -> EnrollmentRepository:
+    return EnrollmentRepository(session)
+
+
+# All of these resolve to the same session within one request - FastAPI calls
 # each dependency once and reuses the result - so an endpoint touching a
 # course and its modules works in a single transaction.
+#
+# Enrollment depends on that being true rather than merely convenient: the
+# row lock it takes on a course is held by the session's transaction, and an
+# endpoint holding two sessions would lock in one and insert in the other.
 CourseRepo = Annotated[CourseRepository, Depends(get_course_repository)]
 ModuleRepo = Annotated[ModuleRepository, Depends(get_module_repository)]
 LessonRepo = Annotated[LessonRepository, Depends(get_lesson_repository)]
+EnrollmentRepo = Annotated[EnrollmentRepository, Depends(get_enrollment_repository)]
 
 # Reads the Authorization header and expects `Bearer <token>`.
 #

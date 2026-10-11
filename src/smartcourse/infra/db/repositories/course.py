@@ -15,7 +15,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from smartcourse.infra.db.models.course import Course, Lesson, Module
+from smartcourse.infra.db.models.course import (
+    Course,
+    CoursePrerequisite,
+    Lesson,
+    Module,
+)
 
 
 class CourseRepository:
@@ -41,6 +46,36 @@ class CourseRepository:
             .where(Course.id == course_id)
             .options(selectinload(Course.modules).selectinload(Module.lessons))
         )
+
+    async def prerequisite_ids(self, course_id: UUID) -> set[UUID]:
+        """The courses that must be finished before this one. FR-08.
+
+        Only the ids. The service compares them against what the student has
+        completed, and needs nothing else about them - loading whole Course
+        objects to look at their primary keys would be wasteful.
+
+        A set because the question asked of it is set subtraction: which of
+        these has the student not done.
+        """
+        rows = await self._session.scalars(
+            select(CoursePrerequisite.prerequisite_course_id).where(
+                CoursePrerequisite.course_id == course_id
+            )
+        )
+        return set(rows)
+
+    async def titles_for(self, course_ids: set[UUID]) -> dict[UUID, str]:
+        """Names for a set of ids, in one query.
+
+        Used to tell a student *which* prerequisites they are missing. A list
+        of UUIDs is not something anyone can act on.
+        """
+        if not course_ids:
+            return {}
+        rows = await self._session.execute(
+            select(Course.id, Course.title).where(Course.id.in_(course_ids))
+        )
+        return {row.id: row.title for row in rows}
 
     async def list(
         self,

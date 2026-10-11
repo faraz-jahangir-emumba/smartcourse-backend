@@ -28,10 +28,12 @@ from smartcourse.infra.db.repositories.course import (
     LessonRepository,
     ModuleRepository,
 )
+from smartcourse.infra.db.repositories.enrollment import EnrollmentRepository
 from smartcourse.infra.db.repositories.user import UserRepository
 
 __all__ = [
     "CourseRepository",
+    "EnrollmentRepository",
     "LessonRepository",
     "ModuleRepository",
     "UserRepository",

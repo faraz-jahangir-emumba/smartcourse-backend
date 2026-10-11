@@ -159,6 +159,47 @@ out permanently — which is its own input, its own rules and its own tests.
 | `PATCH` | `/lessons/{id}` | the owning instructor |
 | `DELETE` | `/lessons/{id}` | the owning instructor |
 
+### Enrollment
+
+| | | Who |
+|---|---|---|
+| `POST` | `/courses/{id}/enrollments/enroll` | any student |
+| `POST` | `/courses/{id}/enrollments/withdraw` | the enrolled student |
+| `GET` | `/courses/{id}/enrollments` | the owning instructor, or an admin |
+| `GET` | `/users/me/enrollments` | any signed-in user |
+
+Two verbs among all the nouns, deliberately. Enrolling and withdrawing are
+named state transitions with rules that can refuse them; a roster is a
+collection. A verb earns its place only when a transition has a name and
+rules — `PATCH {"status": "withdrawn"}` would let a student mark themselves
+`completed` without finishing a lesson.
+
+Neither endpoint takes a body. Which course is in the path, who you are is in
+the token, and a body would be a third place to say the same thing.
+
+**Four rules decide whether you may join**, in this order:
+
+| | |
+|---|---|
+| The course is published | otherwise 404 — a 403 would confirm a draft exists |
+| You hold the `student` role | 403. UC-07: an instructor who wants to learn adds the role |
+| You are not already enrolled | 409. FR-06 |
+| Prerequisites are *completed* | 409, naming what is missing. Being part way through does not count |
+| A seat is free | 409. FR-07 |
+
+Cheapest first, and the capacity check last on purpose — it is the only one
+that takes a database lock, and the lock is held until the request commits.
+
+**Withdrawing does not delete anything.** The row stays and its status
+changes, because FR-10 requires history and `lesson_progress` cascades from
+enrollments. `GET /users/me/enrollments` returns every status, including the
+courses you left. Re-enrolling later creates a new row with fresh progress —
+which is why `uq_enrollments_one_active` is a *partial* unique index: one
+active enrollment, unlimited history.
+
+**Capacity is nullable, and null is not zero.** Null means unlimited, and an
+unlimited course takes no lock at all.
+
 ### Three things worth knowing before using it
 
 **Who can see what.** FR-05 promises students browse *published* courses, and
