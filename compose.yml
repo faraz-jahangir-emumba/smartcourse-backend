@@ -48,6 +48,50 @@ services:
       timeout: 5s
       retries: 10
 
-# Declares the volume used above. Docker manages where it physically sits.
+  # Temporal, for the publishing workflow. Guidelines Week 2 names it, and
+  # Part A's tech stack lists it as "Temporal (workflows)".
+  #
+  # This is the *development* server: one container holding the server, its
+  # storage and its web UI. The production shape is five containers - Postgres,
+  # a schema-setup job, the server, a namespace-creation job, and a separate
+  # UI - which is what temporalio/samples-server publishes. We do not need any
+  # of that to learn the programming model, and every extra container is
+  # another thing that can fail on a laptop.
+  #
+  # What we give up: history is kept in a SQLite file rather than Postgres,
+  # so this is not how it would be deployed. Worth being able to say out loud.
+  temporal:
+    image: temporalio/temporal:latest
+    restart: unless-stopped
+
+    # 7233 is the gRPC port our worker and API connect to.
+    # 8233 serves the web UI - open it to watch a workflow run step by step.
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+    # Temporal's own bookkeeping: which step each workflow reached, what every
+    # activity returned, what failed and what is still pending. Without the
+    # volume, every restart forgets every workflow - which is the one thing
+    # Temporal exists not to do.
+    volumes:
+      - temporal-data:/home/temporal
+
+    # --ip 0.0.0.0 makes it listen on all interfaces inside the container, so
+    # the published ports above actually reach it. Bound to localhost (the
+    # default) it would only be reachable from inside the container.
+    #
+    # start-dev also creates the "default" namespace on its own. The
+    # production setup needs a separate container just for that.
+    command: server start-dev --ip 0.0.0.0 --db-filename /home/temporal/temporal.db
+
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+# Declares the volumes used above. Docker manages where they physically sit.
 volumes:
   postgres-data:
+  temporal-data:
