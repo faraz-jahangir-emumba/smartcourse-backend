@@ -393,13 +393,14 @@ async def _set_prerequisites(
     # was dropped from Module 2 on 8 October because nothing in the brief
     # asks for it. A two-course loop is something an instructor does by
     # accident; a three-course loop takes real determination. See STATE.md.
-    for candidate in wanted:
-        if course.id in await courses.requires(candidate):
-            titles = await courses.titles_for({candidate})
-            raise ValidationError(
-                "That would make two courses require each other.",
-                details={"conflicts_with": titles.get(candidate, str(candidate))},
-            )
+    dependents = await courses.required_by(course.id)
+    conflicts = wanted & dependents
+    if conflicts:
+        titles = await courses.titles_for(conflicts)
+        raise ValidationError(
+            "That would make two courses require each other.",
+            details={"conflicts_with": sorted(titles.values())},
+        )
 
     await courses.replace_prerequisites(course.id, list(wanted))
 

@@ -107,13 +107,24 @@ class CourseRepository:
         )
         return set(rows)
 
-    async def requires(self, course_id: UUID) -> set[UUID]:
-        """What this course lists as its own prerequisites.
+    async def required_by(self, course_id: UUID) -> set[UUID]:
+        """Which courses list this one as a prerequisite.
 
-        Same query as prerequisite_ids, named for the question the cycle
-        check asks rather than the one enrollment asks.
+        The mirror of prerequisite_ids - same table, read from the other
+        side. It answers "who depends on me", which is the question the cycle
+        check needs: anything already depending on this course cannot also be
+        depended on by it.
+
+        One query regardless of how many prerequisites are being set. Asking
+        it the other way round - "does this candidate require me?", once per
+        candidate - is the same answer for N round trips.
         """
-        return await self.prerequisite_ids(course_id)
+        rows = await self._session.scalars(
+            select(CoursePrerequisite.course_id).where(
+                CoursePrerequisite.prerequisite_course_id == course_id
+            )
+        )
+        return set(rows)
 
     async def titles_for(self, course_ids: set[UUID]) -> dict[UUID, str]:
         """Names for a set of ids, in one query.

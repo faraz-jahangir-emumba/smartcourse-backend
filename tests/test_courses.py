@@ -760,7 +760,7 @@ async def test_two_courses_cannot_require_each_other(
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["details"]["conflicts_with"] == "Second"
+    assert response.json()["error"]["details"]["conflicts_with"] == ["Second"]
 
 
 async def test_prerequisites_set_through_the_api_block_enrollment(
