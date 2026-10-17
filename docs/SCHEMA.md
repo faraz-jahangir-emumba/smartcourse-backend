@@ -447,6 +447,15 @@ orphaned.
 
 ## Search
 
+> **Status: designed, not built.** Nothing in this section exists in the
+> database yet — there is no `tsvector` column and no GIN index in either
+> migration. It is scheduled for Module 2, alongside publishing, because that
+> is when lesson content is first processed and there is something to index.
+>
+> Flagged in the Week 1 review (16 October) for reading as though it were
+> already there. Everything below is the design, not a description of the
+> schema as it stands.
+
 Part A §2 requires content stored in a structure supporting *"Fast retrieval"*
 and *"Search"*.
 
@@ -540,7 +549,8 @@ run out and need renumbering anyway.
 |---|---|
 | Circular prerequisite chains beyond one hop | Enforced in the service layer with a recursive query, not by a constraint. FR-08a |
 | Two instructors editing one course at once | Last write wins today. If it becomes a real problem, add a `version` column to `courses` and reject writes carrying a stale version |
-| Full-text search is English-only | `to_tsvector('english', ...)` is fixed in the generated column. Multi-language would need a language column per row and a different index strategy |
+| **Full-text search is not implemented at all** | Designed above; no migration creates the column or the index. Module 2, with publishing |
+| Full-text search will be English-only | `to_tsvector('english', ...)` is fixed in the generated column *as designed*. Multi-language would need a language column per row and a different index strategy |
 | Chunk size and overlap are not yet fixed | Decided in Module 2 when publishing is built, and it must be right — Module 4's embeddings are built on whatever it produces |
 | Embeddings for chunks | Module 4. A vector column is added to `chunks`; nothing else about the table changes |
 | Content chunks for the assistant | Module 4. Depends on the chunking decisions made in Module 2 |
