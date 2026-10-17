@@ -17,7 +17,12 @@ from smartcourse.domain.errors import (
 )
 from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import UserRepository
-from smartcourse.infra.security import hash_password, needs_rehash, verify_password
+from smartcourse.infra.security import (
+    hash_password,
+    needs_rehash,
+    verify_dummy_password,
+    verify_password,
+)
 
 # Roles somebody may give themselves when signing up.
 #
@@ -61,10 +66,15 @@ async def register_user(
     if await users.get_by_email(email) is not None:
         raise ConflictError("That email is already registered.")
 
+    # Hashed before building the User so the await is its own statement -
+    # `password=await hash_password(...)` inside the constructor is legal but
+    # reads badly.
+    hashed = await hash_password(password)
+
     return await users.add(
         User(
             email=email,
-            password=hash_password(password),
+            password=hashed,
             full_name=full_name.strip(),
             # Deduplicated and ordered, so ["student","student"] does not
             # become two entries and the stored value is predictable.
@@ -88,9 +98,17 @@ async def authenticate_user(
         # An unknown email and a wrong password must be indistinguishable.
         # Otherwise the login form becomes a way to discover which addresses
         # have accounts, which is the first half of breaking into one.
+        #
+        # Identical *messages* are not enough on their own. Returning here
+        # immediately, while a wrong password waits for Argon2, leaves a
+        # timing difference big enough to measure from outside - so the two
+        # cases are distinguishable after all, just by a stopwatch instead of
+        # by reading the response. Hashing against a dummy and discarding the
+        # answer makes both paths cost the same.
+        await verify_dummy_password()
         raise AuthenticationError("Incorrect email or password.")
 
-    if not verify_password(user.password, password):
+    if not await verify_password(user.password, password):
         raise AuthenticationError("Incorrect email or password.")
 
     if not user.is_active:
@@ -110,7 +128,7 @@ async def authenticate_user(
         # the attribute is enough - the commit at the end of the request
         # flushes it as an UPDATE. An explicit save here would imply
         # persistence depends on remembering to call it, which it does not.
-        user.password = hash_password(password)
+        user.password = await hash_password(password)
 
     return user
 

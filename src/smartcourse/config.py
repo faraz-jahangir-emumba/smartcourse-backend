@@ -9,8 +9,13 @@ process boots, not at 2am on the first request that happens to need it.
 """
 
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Declared once, so the validator below and the default can never drift apart.
+DEV_JWT_SECRET = "dev-only-insecure-secret-do-not-use-in-any-real-deployment"
 
 
 class Settings(BaseSettings):
@@ -23,6 +28,25 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # --- environment ------------------------------------------------------
+    # Which kind of deployment this is. Only "local" is permitted to run with
+    # insecure defaults - see the validator at the bottom of this class.
+    #
+    # Defaults to "local" so a fresh clone starts with no configuration. The
+    # risk that creates is the reverse of the usual one: a real deployment
+    # that forgets to set it gets the permissive mode. Accepted because the
+    # alternative - defaulting to "production" - means the app refuses to
+    # start on a laptop until somebody works out why.
+    environment: Literal["local", "staging", "production"] = "local"
+
+    # Log every SQL statement, with its bound parameters.
+    #
+    # Those parameters include email addresses and password hashes, which is
+    # why this defaults to off rather than on. It was hardcoded to True while
+    # learning - invaluable for seeing what your Python turns into, and not
+    # something that should reach a shared environment.
+    db_echo: bool = False
+
     # --- security ---------------------------------------------------------
     # The key every token is signed with. Anyone holding it can mint a token
     # for any user, so in a real deployment this comes from the environment and
@@ -31,7 +55,7 @@ class Settings(BaseSettings):
     # At least 32 bytes: HMAC-SHA256 is defined for keys of at least its own
     # output size, and PyJWT warns below that. This default is long enough to
     # be valid and obviously fake so it cannot be mistaken for a real key.
-    jwt_secret: str = "dev-only-insecure-secret-do-not-use-in-any-real-deployment"
+    jwt_secret: str = DEV_JWT_SECRET
     jwt_algorithm: str = "HS256"
 
     # PRD A-01: one hour, no refresh flow. Short because a token cannot be
@@ -63,6 +87,28 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+
+    @model_validator(mode="after")
+    def _refuse_the_dev_secret_outside_local(self) -> "Settings":
+        """Fail to start rather than sign tokens with a published key.
+
+        The default secret is in the git history, so anyone who can read the
+        repository can mint a token for any user id. And user ids are not
+        secret either - instructor_id is returned on every course - so there
+        is nothing left to guess.
+
+        Refusing at startup rather than warning, because a warning in a log
+        nobody reads is the same as no warning. A deployment that cannot
+        start gets noticed in minutes.
+        """
+        if self.environment != "local" and self.jwt_secret == DEV_JWT_SECRET:
+            raise ValueError(
+                "JWT_SECRET is still the development default while "
+                f"ENVIRONMENT is {self.environment!r}. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        return self
 
 
 @lru_cache

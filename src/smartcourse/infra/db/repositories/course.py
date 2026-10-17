@@ -146,7 +146,24 @@ class ModuleRepository:
 
         Position is never chosen by a caller - it is the outcome of adding or
         reordering.
+
+        The course row is locked first, and that is the whole point of this
+        being three lines rather than one. MAX+1 is a check-then-write: two
+        requests adding a module to the same course both read 2, both write
+        3, and uq_modules_course_position rejects the loser. The caller did
+        nothing wrong and gets an error.
+
+        Locking the course serialises additions to that one course, so the
+        second request reads 3 and writes 4. Same trick as the capacity
+        check, and the same reasoning: the parent row is the token that says
+        who may decide what comes next.
+
+        Only additions to the same course wait. Two instructors adding
+        modules to different courses never meet.
         """
+        await self._session.execute(
+            select(Course.id).where(Course.id == course_id).with_for_update()
+        )
         highest = await self._session.scalar(
             select(func.max(Module.position)).where(Module.course_id == course_id)
         )
@@ -188,6 +205,11 @@ class LessonRepository:
         return list(rows)
 
     async def next_position(self, module_id: UUID) -> int:
+        """Same check-then-write race as ModuleRepository.next_position, and
+        the same fix: lock the parent module before counting."""
+        await self._session.execute(
+            select(Module.id).where(Module.id == module_id).with_for_update()
+        )
         highest = await self._session.scalar(
             select(func.max(Lesson.position)).where(Lesson.module_id == module_id)
         )
