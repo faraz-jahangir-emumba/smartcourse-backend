@@ -3,21 +3,27 @@ name: CI
 # Every push and every pull request. Tests that only run when somebody
 # remembers to run them are tests that stop running.
 #
-# No branch list on `push`, deliberately. A pattern like module-* silently
-# skips anything named differently - a hotfix branch, a spike - and a skipped
-# run looks exactly like a passing one. Running everywhere costs nothing on a
-# public repository.
+# Pushes to main and to module-* branches, and every pull request.
 #
-# `pull_request` is kept even though push already covers the branch, because
-# it asks a different question: it builds a temporary merge of the branch with
-# main and tests *that*. A push run only tests the branch as it stands, so it
-# cannot see a failure that only appears once the two are combined.
+# The `module` prefix is reserved for the one main branch per module -
+# module-2-enrollment. Everything else puts its subject first and names the
+# module at the end: review-fixes-module-1, bugfix-module-2-enrollment.
 #
-# While a PR is open both fire, so those pushes produce two runs. With pull
-# requests opened at the end of a module that is a handful of duplicates per
-# module - not worth losing the merge check to avoid.
+# So the pattern is not a guess at what branches might be called. It is the
+# thing that marks a branch as a module's trunk, and push runs follow it.
+#
+# A fix branch therefore gets no push runs - only the one its pull request
+# triggers. Deliberate, and bounded: `pull_request` has no branch filter, so
+# nothing reaches main untested whatever it is called. The cost is no
+# feedback while a fix branch is being worked on, before its PR exists.
+#
+# `pull_request` is kept even though push already covers module branches,
+# because it asks a different question: it builds a temporary merge of the
+# branch with main and tests *that*. A push run only tests the branch as it
+# stands, so it cannot see a failure that appears once the two are combined.
 on:
   push:
+    branches: ["main", "module-*"]
   pull_request:
 
 # Pushing again before a run finishes cancels the first. Only the newest
