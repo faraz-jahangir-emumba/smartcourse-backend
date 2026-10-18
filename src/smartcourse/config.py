@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     # something that should reach a shared environment.
     db_echo: bool = False
 
+    # --- the first admin --------------------------------------------------
+    # Read by `python -m smartcourse.seed`, which is the only way an admin
+    # account can come into existence - admin is not self-assignable and
+    # there is no endpoint that grants it.
+    #
+    # Both default to None rather than to anything usable. A default admin
+    # password is a published admin password, and this one would be in the
+    # repository.
+    admin_email: str | None = None
+    admin_password: str | None = None
+
     # --- security ---------------------------------------------------------
     # The key every token is signed with. Anyone holding it can mint a token
     # for any user, so in a real deployment this comes from the environment and

@@ -72,6 +72,35 @@ services:
       postgres:
         condition: service_healthy
 
+  # Create the first admin, then exit. Beside migrate, and for the same
+  # reason: it is a job, not a server.
+  #
+  # Admin is not self-assignable and no endpoint grants it, so without this
+  # the only way to get one is editing the database by hand - which is what
+  # the Week 1 review found.
+  #
+  # Runs on every `docker compose up` and is safe to. With no ADMIN_EMAIL set
+  # it prints a line and exits 0, so a fresh clone with no .env still comes
+  # up green. With one set it creates the account, and running again finds it
+  # already there and changes nothing.
+  seed:
+    build: .
+    command: uv run python -m smartcourse.seed
+    environment:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      # Passed through from your shell or .env, with no default here. A
+      # default admin password is a published admin password.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    depends_on:
+      # After the tables exist, obviously - it inserts a row.
+      migrate:
+        condition: service_completed_successfully
+
   # The API.
   api:
     build: .
