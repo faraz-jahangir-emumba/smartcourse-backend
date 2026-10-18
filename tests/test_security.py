@@ -65,28 +65,42 @@ async def test_an_unknown_email_takes_as_long_as_a_wrong_password(
 
 
 async def test_hashing_does_not_block_the_event_loop() -> None:
-    """Argon2 is deliberately slow and memory-hard - that is the point of it -
-    but it is ordinary blocking CPU work. Called straight from an `async def`
-    it holds the event loop for its whole duration, so a burst of logins
-    stalls every other request on that worker, including ones that never
-    touch a password.
+    """The loop must stay free to serve other requests while a hash runs.
 
-    asyncio.to_thread moves it off the loop. argon2-cffi releases the GIL
-    while its C code runs, so the hashes genuinely overlap.
+    Argon2 is deliberately slow and memory-hard - that is the point of it -
+    but it is ordinary blocking CPU work, not waiting. Called straight from
+    an `async def` it holds the event loop for its whole duration, so a burst
+    of logins stalls every other request on that worker, including ones that
+    never touch a password. asyncio.to_thread moves it off the loop.
 
-    Four at once: serialised that is about 4x one hash, overlapped it is
-    close to 1x. The threshold is 3x - far enough from both that thread
-    scheduling noise cannot reach it.
+    Measured with a ticker: a coroutine that wakes every 5ms and counts. If
+    the loop is blocked it never gets to run and the count stays at zero. If
+    it is free, a hash of roughly 40-60ms gives it several turns.
+
+    An earlier version of this test timed four hashes against one and
+    asserted they overlapped. That passed locally and failed in CI at 4.07x,
+    and CI was right: argon2-cffi defaults to parallelism=4, so one hash
+    already saturates a two-core runner and no amount of threading will make
+    four of them finish sooner. Overlap depends on spare cores. Keeping the
+    loop free does not, and is the property the fix is actually for.
     """
-    start = time.perf_counter()
-    await hash_password("one password")
-    single = time.perf_counter() - start
+    ticks = 0
 
-    start = time.perf_counter()
-    await asyncio.gather(*(hash_password(f"password {i}") for i in range(4)))
-    concurrent = time.perf_counter() - start
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
 
-    assert concurrent < single * 3, (
-        f"four hashes took {concurrent:.3f}s against {single:.3f}s for one - "
-        f"they are running one after another, so the loop is blocked"
+    counting = asyncio.create_task(ticker())
+    try:
+        # Let the ticker reach its first await before the hash starts.
+        await asyncio.sleep(0)
+        await hash_password("one password")
+    finally:
+        counting.cancel()
+
+    assert ticks >= 3, (
+        f"the loop ticked {ticks} times during a hash - it is blocked, so "
+        f"every other request waits for Argon2 to finish"
     )
