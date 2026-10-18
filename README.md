@@ -121,6 +121,12 @@ Login returns a bearer token lasting one hour, sent back as
 user is already loaded to check the password, so returning it saves every
 client an immediate second call.
 
+The token carries a user id and nothing else. Roles are read from the
+database on every request, which costs one query and buys two things: a role
+change takes effect on the next call rather than when the token expires, and
+a deactivated account stops working immediately instead of staying valid for
+up to an hour.
+
 Registration accepts `student` and `instructor`. **Admin cannot be
 self-assigned** — a public endpoint where the caller picks their own role
 would let anyone become an admin by editing one field. The same rule applies
@@ -279,7 +285,7 @@ docker compose down                               # stop, keep data
 docker compose down -v                            # stop and delete data
 ```
 
-**44 tests**, and they need Postgres running. Isolation works at two levels: a
+**65 tests**, and they need Postgres running. Isolation works at two levels: a
 throwaway `smartcourse_test` database is created, migrated from empty and
 dropped per run — which is also the only thing that checks the migrations work
 on a fresh clone — and within it each test runs in a transaction that is

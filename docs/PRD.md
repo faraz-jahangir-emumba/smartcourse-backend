@@ -343,17 +343,40 @@ The brief leaves gaps on purpose. Here is where I filled one in, and why.
 
 ## 10. Traceability
 
-One row per requirement. It shows where each one was designed, built and
-tested. Filled in as I go — not at the end.
+One row per requirement, filled in as each is built. A blank Code column
+means it does not exist yet — not that the row was forgotten.
 
-| Requirement | Design | Code | Test | Week |
+| Requirement | Design | Code | Test | Status |
 |---|---|---|---|---|
-| FR-01 to FR-03 | | | | 2 |
-| FR-04, FR-05 | | | | 3 |
-| FR-06 to FR-10 | | | | 4 |
-| FR-11 to FR-13 | | | | 5 |
-| FR-14, FR-15 | | | | 4 |
-| FR-16 to FR-18 | | | | 6 |
-| FR-19, FR-20 | | | | 7 |
-| FR-21, FR-22 | | | | 8 |
-| FR-23 to FR-26 | | | | 9 |
+| FR-01 Register and log in | SCHEMA.md §1 | `services/auth.py`, `api/routers/auth.py` | `test_auth.py` | ✅ Module 1 |
+| FR-02 Roles on every user | SCHEMA.md §1 | `models/user.py` (`roles text[]`), `services/auth.py` | `test_auth.py` | ✅ Module 1 |
+| FR-03 Roles limit what you can do | SCHEMA.md §1 | `api/deps.py` (`require_roles`), `services/course.py` | `test_courses.py` | ✅ Module 1 |
+| FR-03a Instructor can also be a student | A-07 | `api/routers/users.py` (`PATCH /users/me`) | `test_auth.py` | ✅ Module 1 |
+| FR-04 Create and edit courses, modules, lessons | SCHEMA.md §3–5 | `services/course.py`, `api/routers/courses.py` | `test_courses.py` | ✅ Module 1 |
+| FR-05 Browse published courses | SCHEMA.md §3 | `services/course.py` (`_can_view`, `list_courses`) | `test_courses.py` | ✅ Module 1 |
+| FR-05 **Search** published courses | SCHEMA.md §Search | — | — | ⬜ Module 2, with publishing |
+| FR-06 No duplicate enrollments | SCHEMA.md §9 (partial unique index) | `services/enrollment.py` | `test_enrollment.py` | 🔵 Module 2 |
+| FR-07 Capacity limits | SCHEMA.md §3 | `services/enrollment.py` (row lock) | `test_enrollment.py` | 🔵 Module 2 |
+| FR-08 Prerequisites | SCHEMA.md §3a | `services/enrollment.py`, `services/course.py` | `test_courses.py` | 🔵 Module 2 |
+| FR-08a Reject circular prerequisites | SCHEMA.md §3a | one hop only | `test_courses.py` | 🟡 Partial — longer chains deferred |
+| FR-09 Enrolling creates a progress record | SCHEMA.md §9 | `services/enrollment.py` | `test_enrollment.py` | 🔵 Module 2 |
+| FR-10 Enrollment history is kept | SCHEMA.md §9 | `services/enrollment.py` (withdraw) | `test_enrollment.py` | 🔵 Module 2 |
+| FR-10a Upload files of any type | SCHEMA.md §7 | — | — | ⬜ Module 3 |
+| FR-10b Background text extraction | SCHEMA.md §7 | — | — | ⬜ Module 3 |
+| FR-10c Keyword search over lessons | SCHEMA.md §Search | — | — | ⬜ Module 2 |
+| FR-11 Publishing splits content into chunks | SCHEMA.md §8 | — | — | ⬜ Module 2 |
+| FR-11a Re-publishing skips unchanged content | SCHEMA.md §8 (`content_hash`) | — | — | ⬜ Module 2 |
+| FR-12 Ready only when processing finishes | SCHEMA.md §3 (status machine) | — | — | ⬜ Module 2 |
+| FR-13 A failed publish is never half-applied | SCHEMA.md §3 | — | — | ⬜ Module 2 |
+| FR-14, FR-15 Lesson and course completion | SCHEMA.md §10 | — | — | ⬜ Module 3 |
+| FR-16 to FR-18 Background work, idempotency, failed events | SCHEMA.md §11 | — | — | ⬜ Module 3 |
+| FR-19, FR-20 Platform statistics | SCHEMA.md §5 | — | — | ⬜ Module 3 |
+| FR-21, FR-22 Retrieval and citation | — | — | — | ⬜ Module 4 |
+| FR-23 to FR-26 Assistant and streaming | — | — | — | ⬜ Module 5 |
+
+✅ built and merged · 🔵 built, on a module branch · 🟡 partial · ⬜ not started
+
+**Known divergence.** The Week column that used to be here referred to a
+nine-week plan whose dates no longer hold — Module 1 ran 2–27 September
+against a two-week slot. Status replaces it; the live schedule is
+`STATE.md`, not this document.

@@ -22,8 +22,13 @@ _settings = get_settings()
 engine: AsyncEngine = create_async_engine(
     _settings.database_url,
     # Log every statement. Invaluable while learning - you see the SQL your
-    # Python turned into. Turn it off once it becomes noise.
-    echo=True,
+    # Python turned into.
+    #
+    # Off by default, because the log includes bound parameters: email
+    # addresses and password hashes end up in stdout, and from there in
+    # whatever collects it. Set DB_ECHO=true in .env while working on
+    # queries, not anywhere shared.
+    echo=_settings.db_echo,
     # How many connections to keep open and reuse. Opening one costs tens of
     # milliseconds, so reusing them matters more than it sounds.
     pool_size=10,

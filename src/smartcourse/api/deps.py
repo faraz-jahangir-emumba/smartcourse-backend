@@ -29,7 +29,20 @@ from smartcourse.infra.db.repositories import (
 from smartcourse.infra.db.session import get_session
 from smartcourse.infra.security import TokenError, decode_access_token
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+# scope="function" is load-bearing, not decoration.
+#
+# A dependency with yield ends either before or after the response is sent.
+# FastAPI's default is "request" - after - which means get_session's commit
+# runs once the client already has its 201. If that commit fails, the caller
+# has been told the work succeeded and nothing can correct it.
+#
+# That is not hypothetical here. uq_modules_course_position is DEFERRABLE
+# INITIALLY DEFERRED, so it is only checked at COMMIT - precisely the moment
+# that was happening too late.
+#
+# "function" ends the dependency after the endpoint returns but before the
+# response goes out, so a failed commit becomes a 500 the caller can act on.
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
 
 
 def get_user_repository(session: SessionDep) -> UserRepository:
