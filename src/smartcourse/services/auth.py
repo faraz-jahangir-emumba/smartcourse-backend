@@ -17,7 +17,12 @@ from smartcourse.domain.errors import (
 )
 from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import UserRepository
-from smartcourse.infra.security import hash_password, needs_rehash, verify_password
+from smartcourse.infra.security import (
+    hash_password,
+    needs_rehash,
+    verify_dummy_password,
+    verify_password,
+)
 
 # Roles somebody may give themselves when signing up.
 #
@@ -26,6 +31,33 @@ from smartcourse.infra.security import hash_password, needs_rehash, verify_passw
 # request - the kind of hole that looks obvious written down and is very easy
 # to leave open. Admin is granted by an existing admin, never claimed.
 SELF_ASSIGNABLE_ROLES = ("student", "instructor")
+
+
+def _assert_self_assignable(roles: list[str]) -> None:
+    """The role rules, in one place.
+
+    Registration and profile editing both apply them, and before this they
+    each had their own copy. Two copies of one rule is one rule and one
+    opportunity: adding a fourth role, or relaxing the admin rule, would have
+    to be remembered twice, and forgetting the second is how `admin` becomes
+    self-assignable through the endpoint nobody thought about.
+    """
+    if not roles:
+        # A user with no roles could do nothing and should not exist.
+        raise ValidationError("At least one role is required.")
+
+    invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
+    if invalid:
+        # Admin is granted, never claimed. Allowing it on either path would
+        # simply move the hole rather than close it - register as a student,
+        # then promote yourself.
+        #
+        # Say which roles are allowed as well as which were refused. An error
+        # that does not tell you what to do instead is half an error.
+        raise ValidationError(
+            f"Cannot self-assign: {', '.join(invalid)}.",
+            details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
+        )
 
 
 async def register_user(
@@ -46,25 +78,20 @@ async def register_user(
     # second one will be certain they already registered.
     email = email.strip().lower()
 
-    if not roles:
-        raise ValidationError("At least one role is required.")
-
-    invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
-    if invalid:
-        # Say which roles are allowed as well as which were refused. An error
-        # that does not tell you what to do instead is half an error.
-        raise ValidationError(
-            f"Cannot self-assign: {', '.join(invalid)}.",
-            details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
-        )
+    _assert_self_assignable(roles)
 
     if await users.get_by_email(email) is not None:
         raise ConflictError("That email is already registered.")
 
+    # Hashed before building the User so the await is its own statement -
+    # `password=await hash_password(...)` inside the constructor is legal but
+    # reads badly.
+    hashed = await hash_password(password)
+
     return await users.add(
         User(
             email=email,
-            password=hash_password(password),
+            password=hashed,
             full_name=full_name.strip(),
             # Deduplicated and ordered, so ["student","student"] does not
             # become two entries and the stored value is predictable.
@@ -88,9 +115,17 @@ async def authenticate_user(
         # An unknown email and a wrong password must be indistinguishable.
         # Otherwise the login form becomes a way to discover which addresses
         # have accounts, which is the first half of breaking into one.
+        #
+        # Identical *messages* are not enough on their own. Returning here
+        # immediately, while a wrong password waits for Argon2, leaves a
+        # timing difference big enough to measure from outside - so the two
+        # cases are distinguishable after all, just by a stopwatch instead of
+        # by reading the response. Hashing against a dummy and discarding the
+        # answer makes both paths cost the same.
+        await verify_dummy_password()
         raise AuthenticationError("Incorrect email or password.")
 
-    if not verify_password(user.password, password):
+    if not await verify_password(user.password, password):
         raise AuthenticationError("Incorrect email or password.")
 
     if not user.is_active:
@@ -110,7 +145,7 @@ async def authenticate_user(
         # the attribute is enough - the commit at the end of the request
         # flushes it as an UPDATE. An explicit save here would imply
         # persistence depends on remembering to call it, which it does not.
-        user.password = hash_password(password)
+        user.password = await hash_password(password)
 
     return user
 
@@ -145,18 +180,7 @@ async def update_profile(
         user.full_name = full_name.strip()
 
     if roles is not None:
-        if not roles:
-            raise ValidationError("At least one role is required.")
-
-        invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
-        if invalid:
-            # Same rule as registration: admin is granted, never claimed.
-            # Allowing it here would simply move the hole rather than close
-            # it - register as a student, then promote yourself.
-            raise ValidationError(
-                f"Cannot self-assign: {', '.join(invalid)}.",
-                details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
-            )
+        _assert_self_assignable(roles)
 
         # Dropping `instructor` while still owning courses is allowed. The
         # courses stay theirs and simply cannot be edited until they take the

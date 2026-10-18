@@ -48,6 +48,84 @@ services:
       timeout: 5s
       retries: 10
 
+  # Apply migrations, then exit.
+  #
+  # Its own service rather than something the API does at startup. Two
+  # reasons: running several API containers would mean several of them
+  # migrating at once, and a migration failure should stop the deploy rather
+  # than leave a server running against a schema it does not match.
+  #
+  # `service_completed_successfully` below is what makes the API wait for it.
+  migrate:
+    build: .
+    command: uv run alembic upgrade head
+    environment:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+      # "postgres", not "localhost". Inside a container localhost is the
+      # container itself; the service name is how Docker's DNS finds the
+      # database.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Create the first admin, then exit. Beside migrate, and for the same
+  # reason: it is a job, not a server.
+  #
+  # Admin is not self-assignable and no endpoint grants it, so without this
+  # the only way to get one is editing the database by hand - which is what
+  # the Week 1 review found.
+  #
+  # Runs on every `docker compose up` and is safe to. With no ADMIN_EMAIL set
+  # it prints a line and exits 0, so a fresh clone with no .env still comes
+  # up green. With one set it creates the account, and running again finds it
+  # already there and changes nothing.
+  seed:
+    build: .
+    command: uv run python -m smartcourse.seed
+    environment:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      # Passed through from your shell or .env, with no default here. A
+      # default admin password is a published admin password.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    depends_on:
+      # After the tables exist, obviously - it inserts a row.
+      migrate:
+        condition: service_completed_successfully
+
+  # The API.
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      ENVIRONMENT: local
+    depends_on:
+      # Not just "postgres is healthy" - the schema has to exist too, or the
+      # first request fails on a missing table.
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 # Declares the volume used above. Docker manages where it physically sits.
 volumes:
   postgres-data:

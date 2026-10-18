@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 #                       -> failed -> publishing
 COURSE_STATUSES = ("draft", "publishing", "ready", "failed")
 
+# As a SQL literal, built from the tuple above rather than retyped. Same
+# reasoning as VALID_ROLES in user.py: two hand-written copies of one list
+# drift, and the drift shows up as a status Python allows and Postgres
+# rejects.
+_COURSE_STATUSES_SQL = ", ".join(f"'{status}'" for status in COURSE_STATUSES)
+
 
 class Course(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "courses"
@@ -95,7 +101,7 @@ class Course(UUIDMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('draft', 'publishing', 'ready', 'failed')",
+            f"status IN ({_COURSE_STATUSES_SQL})",
             name="ck_courses_status_valid",
         ),
         # Zero capacity would mean a course nobody can ever join.
@@ -177,10 +183,15 @@ class Module(UUIDMixin, TimestampMixin, Base):
 
     __tablename__ = "modules"
 
+    # No index=True. uq_modules_course_position is a unique index on
+    # (course_id, position), and a btree index on (a, b) already answers queries
+    # that filter on `a` alone - the rows for one course sit together in
+    # it. A second index on course_id would be a duplicate: a write on
+    # every insert and update, and never chosen by the planner.
+    # Flagged in the Week 1 review.
     course_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("courses.id", ondelete="CASCADE"),
-        index=True,
     )
 
     title: Mapped[str] = mapped_column(String(300))
@@ -223,10 +234,15 @@ class Module(UUIDMixin, TimestampMixin, Base):
 class Lesson(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "lessons"
 
+    # No index=True. uq_lessons_module_position is a unique index on
+    # (module_id, position), and a btree index on (a, b) already answers queries
+    # that filter on `a` alone - the rows for one module sit together in
+    # it. A second index on module_id would be a duplicate: a write on
+    # every insert and update, and never chosen by the planner.
+    # Flagged in the Week 1 review.
     module_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("modules.id", ondelete="CASCADE"),
-        index=True,
     )
 
     title: Mapped[str] = mapped_column(String(300))

@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 # permission checks later, so there is no second list to fall out of step.
 VALID_ROLES = ("student", "instructor", "admin")
 
+# The same list again, as the SQL literal the CHECK constraint needs. Built
+# from the tuple rather than retyped, so adding a role cannot leave the
+# constraint behind - which is the failure that would accept the new role in
+# Python and reject it at the database.
+# No space after the comma, so the generated text matches the migration
+# that created the constraint exactly.
+_VALID_ROLES_SQL = ",".join(f"'{role}'" for role in VALID_ROLES)
+
 
 class User(UUIDMixin, TimestampMixin, Base):
     """Anyone who logs in. One person is one row, whatever they do here."""
@@ -79,7 +87,7 @@ class User(UUIDMixin, TimestampMixin, Base):
         # this, so a typo cannot get in through a migration, a seed script or
         # someone fixing data by hand.
         CheckConstraint(
-            "roles <@ ARRAY['student','instructor','admin']::varchar[]",
+            f"roles <@ ARRAY[{_VALID_ROLES_SQL}]::varchar[]",
             name="ck_users_roles_valid",
         ),
         # A user with no roles could do nothing and should not exist.

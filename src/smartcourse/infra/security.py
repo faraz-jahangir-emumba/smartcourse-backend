@@ -6,6 +6,8 @@ The rules about *who may do what* live in the domain layer; this module only
 establishes who someone is.
 """
 
+import asyncio
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -35,30 +37,76 @@ class TokenError(Exception):
     """
 
 
-def hash_password(password: str) -> str:
-    """Turn a password into a hash to store.
+# A valid Argon2 hash of a value nobody knows, used to burn the same CPU
+# time for an unknown email as for a real one. Computed once at import, not
+# per request - hashing it every time would double the cost of every failed
+# login for no benefit.
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
 
-    The result contains the algorithm and its parameters as well as the hash
-    itself, so verification later knows how it was produced. That is what makes
-    it possible to strengthen the parameters without invalidating every
-    existing password.
-    """
+
+def hash_password_sync(password: str) -> str:
+    """The blocking version. Prefer hash_password unless you have no loop."""
     return _hasher.hash(password)
 
 
-def verify_password(stored_hash: str, password: str) -> bool:
-    """Check a password against a stored hash.
-
-    The hash cannot be reversed. Verification re-runs the same computation on
-    the supplied password and compares - which is why the original is never
-    recoverable, by us or by anyone who steals the database.
-    """
+def verify_password_sync(stored_hash: str, password: str) -> bool:
+    """The blocking version. Prefer verify_password unless you have no loop."""
     try:
         return _hasher.verify(stored_hash, password)
     except (VerifyMismatchError, InvalidHashError):
         # Wrong password, or a stored value that is not an Argon2 hash at all.
         # Both mean "no", and neither is worth distinguishing to the caller.
         return False
+
+
+async def hash_password(password: str) -> str:
+    """Turn a password into a hash to store.
+
+    The result contains the algorithm and its parameters as well as the hash
+    itself, so verification later knows how it was produced. That is what makes
+    it possible to strengthen the parameters without invalidating every
+    existing password.
+
+    Run in a worker thread, and that is the important part. Argon2 is
+    deliberately slow and memory-hard - that is what makes it a good password
+    hash - but it is ordinary blocking CPU work. Called directly inside an
+    `async def` it would hold the event loop for its whole duration, so a
+    burst of logins would stall every other request on the worker, including
+    ones that touch no passwords at all.
+
+    asyncio.to_thread hands it to a thread, letting the loop serve other
+    requests while it runs. This is safe here despite the GIL because
+    argon2-cffi releases it while the C code works.
+    """
+    return await asyncio.to_thread(hash_password_sync, password)
+
+
+async def verify_password(stored_hash: str, password: str) -> bool:
+    """Check a password against a stored hash.
+
+    The hash cannot be reversed. Verification re-runs the same computation on
+    the supplied password and compares - which is why the original is never
+    recoverable, by us or by anyone who steals the database.
+
+    Off the event loop, for the same reason as hash_password.
+    """
+    return await asyncio.to_thread(verify_password_sync, stored_hash, password)
+
+
+async def verify_dummy_password() -> None:
+    """Verify against a hash of nothing, and throw the answer away.
+
+    Called when an email is not registered. Without it, an unknown email
+    returns as soon as the database says "no row", while a wrong password
+    takes however long Argon2 takes - and the difference is measurable from
+    outside. That turns the login form into a way to discover which addresses
+    have accounts, which is exactly what the identical error messages were
+    meant to prevent.
+
+    Doing the work and discarding it costs one hash per failed login and
+    makes the two cases take the same time.
+    """
+    await verify_password(_DUMMY_HASH, "any password at all")
 
 
 def needs_rehash(stored_hash: str) -> bool:
@@ -74,15 +122,25 @@ def needs_rehash(stored_hash: str) -> bool:
         return True
 
 
-def create_access_token(user_id: UUID, roles: list[str]) -> str:
+def create_access_token(user_id: UUID) -> str:
     """Mint a signed token for a user.
 
     The payload is base64, not encrypted - anyone holding the token can read
-    it. So it carries only an id, the roles, and timestamps. Nothing secret.
+    it. So it carries an id and timestamps. Nothing secret.
 
     What makes it trustworthy is the signature, computed from the payload and
     the secret key. Change one character of the payload and it no longer
     matches, and forging a new signature needs the key.
+
+    Roles used to be in here and are not any more. They were never read:
+    get_current_user loads the user from the database on every request - it
+    has to, so that a deactivated account stops working before its token
+    expires - and every permission check uses user.roles from that row.
+
+    A copy of authoritative data that nothing reads is worse than nothing. It
+    goes stale the moment a role changes, and the next person to find it will
+    reasonably assume it is usable and skip the query. Flagged in the Week 1
+    review, 16 October.
     """
     settings = get_settings()
     now = datetime.now(UTC)
@@ -91,11 +149,6 @@ def create_access_token(user_id: UUID, roles: list[str]) -> str:
         # "sub" (subject) is the standard claim for who the token is about.
         # Stringified because JSON has no UUID type.
         "sub": str(user_id),
-        # Roles travel in the token so a permission check needs no database
-        # query. The cost: a role change does not take effect until the current
-        # token expires - at most an hour. Acceptable for a role that changes
-        # rarely; it would not be for anything security-critical.
-        "roles": roles,
         "iat": now,  # issued at
         "exp": now + timedelta(minutes=settings.access_token_ttl_minutes),
     }

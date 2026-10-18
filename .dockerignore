@@ -1,0 +1,20 @@
+# Everything here would be copied into the build context and then into the
+# image. Excluding it keeps builds fast and the image honest.
+
+# The local virtualenv. Built for Windows, useless in a Linux container, and
+# large. The image builds its own with uv sync.
+.venv/
+
+# Real secrets. .env.example is committed and is what belongs in an image;
+# .env is this machine's and must never be baked in.
+.env
+
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Throwaway Temporal spike, not part of the application.
+spike/

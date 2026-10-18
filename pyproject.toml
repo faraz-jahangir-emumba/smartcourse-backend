@@ -1,7 +1,7 @@
 [project]
 name = "smartcourse"
 version = "0.1.0"
-description = "Add your description here"
+description = "Backend for SmartCourse, EduCorp's course delivery platform"
 readme = "README.md"
 authors = [
     { name = "faraz-jahangir-emumba", email = "faraz.jahangir@emumba.com" }

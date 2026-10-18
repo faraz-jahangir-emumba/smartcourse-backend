@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartcourse.domain.errors import (
@@ -26,6 +27,35 @@ from smartcourse.domain.errors import (
     PermissionDeniedError,
     ValidationError,
 )
+
+# Unique constraints, and what it means for a caller when one is violated.
+#
+# Every check-then-write in this codebase has a race in it: two requests both
+# look, both find nothing in the way, and both write. The database is the
+# only thing that can actually prevent the second write, and it does - by
+# raising IntegrityError.
+#
+# Without this mapping that becomes a 500: "something went wrong on our
+# side", when in fact the caller did something perfectly understandable and
+# simply lost a race. A 409 says so, and is retryable.
+#
+# Keyed by constraint name rather than by parsing the message, because the
+# name is ours and stable while the message is Postgres's and is not.
+# Names taken from Postgres, not guessed - two of the first six I wrote did
+# not exist. Check with:
+#   SELECT indexname FROM pg_indexes
+#    WHERE schemaname='public' AND indexdef LIKE 'CREATE UNIQUE%';
+_CONFLICT_BY_CONSTRAINT: dict[str, str] = {
+    # Not uq_users_email: the column is declared unique=True, so SQLAlchemy
+    # names the index ix_users_email rather than giving it a uq_ prefix.
+    "ix_users_email": "That email is already registered.",
+    "uq_modules_course_position": "Another module was added at the same time. Try again.",
+    "uq_lessons_module_position": "Another lesson was added at the same time. Try again.",
+    "uq_enrollments_one_active": "You are already enrolled in this course.",
+    "uq_lesson_progress_once": "That lesson is already marked complete.",
+    "uq_chunks_source_position": "That chunk already exists.",
+    "course_prerequisites_pkey": "That prerequisite is already set.",
+}
 
 # The whole mapping, in one readable place.
 _STATUS_BY_ERROR: dict[type[DomainError], int] = {
@@ -94,6 +124,35 @@ def register_exception_handlers(app: FastAPI) -> None:
             code="http_error",
             message=str(exc.detail),
             status_code=exc.status_code,
+        )
+
+    @app.exception_handler(IntegrityError)
+    async def _integrity(_request: Request, exc: IntegrityError) -> JSONResponse:
+        """A unique constraint the caller lost a race to.
+
+        This is the safety net under every check-then-write in the services.
+        The check gives a good error in the ordinary case; this gives a
+        correct one when two requests arrive together and the check passed
+        for both.
+
+        A constraint we have not named is still a bug, not a conflict, so it
+        falls through to the handler below rather than being reported as
+        something the caller did.
+        """
+        name = getattr(getattr(exc.orig, "__cause__", None), "constraint_name", None)
+        message = _CONFLICT_BY_CONSTRAINT.get(name) if name else None
+
+        if message is None:
+            return _envelope(
+                code="internal_error",
+                message="Something went wrong on our side.",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return _envelope(
+            code="conflict",
+            message=message,
+            status_code=status.HTTP_409_CONFLICT,
         )
 
     @app.exception_handler(Exception)
