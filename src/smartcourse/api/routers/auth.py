@@ -53,16 +53,16 @@ async def register(payload: RegisterRequest, users: UserRepo) -> UserResponse:
 async def login(payload: LoginRequest, users: UserRepo) -> TokenResponse:
     """200 with a token, or 401 saying nothing useful to an attacker.
 
-    Roles travel in the token, so a permission check needs no extra query. The
-    cost is that a role change does not take effect until the token expires -
-    at most an hour.
+    The token carries an id and nothing else. Roles are read from the database
+    on every request by get_current_user, so a role change takes effect on the
+    next call rather than when the token expires.
     """
     user = await auth_service.authenticate_user(
         users, email=payload.email, password=payload.password
     )
     settings = get_settings()
     return TokenResponse(
-        access_token=create_access_token(user.id, user.roles),
+        access_token=create_access_token(user.id),
         expires_in=settings.access_token_ttl_minutes * 60,
         user=UserResponse.model_validate(user),
     )

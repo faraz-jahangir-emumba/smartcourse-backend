@@ -122,15 +122,25 @@ def needs_rehash(stored_hash: str) -> bool:
         return True
 
 
-def create_access_token(user_id: UUID, roles: list[str]) -> str:
+def create_access_token(user_id: UUID) -> str:
     """Mint a signed token for a user.
 
     The payload is base64, not encrypted - anyone holding the token can read
-    it. So it carries only an id, the roles, and timestamps. Nothing secret.
+    it. So it carries an id and timestamps. Nothing secret.
 
     What makes it trustworthy is the signature, computed from the payload and
     the secret key. Change one character of the payload and it no longer
     matches, and forging a new signature needs the key.
+
+    Roles used to be in here and are not any more. They were never read:
+    get_current_user loads the user from the database on every request - it
+    has to, so that a deactivated account stops working before its token
+    expires - and every permission check uses user.roles from that row.
+
+    A copy of authoritative data that nothing reads is worse than nothing. It
+    goes stale the moment a role changes, and the next person to find it will
+    reasonably assume it is usable and skip the query. Flagged in the Week 1
+    review, 16 October.
     """
     settings = get_settings()
     now = datetime.now(UTC)
@@ -139,11 +149,6 @@ def create_access_token(user_id: UUID, roles: list[str]) -> str:
         # "sub" (subject) is the standard claim for who the token is about.
         # Stringified because JSON has no UUID type.
         "sub": str(user_id),
-        # Roles travel in the token so a permission check needs no database
-        # query. The cost: a role change does not take effect until the current
-        # token expires - at most an hour. Acceptable for a role that changes
-        # rarely; it would not be for anything security-critical.
-        "roles": roles,
         "iat": now,  # issued at
         "exp": now + timedelta(minutes=settings.access_token_ttl_minutes),
     }

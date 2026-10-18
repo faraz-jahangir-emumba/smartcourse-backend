@@ -33,6 +33,33 @@ from smartcourse.infra.security import (
 SELF_ASSIGNABLE_ROLES = ("student", "instructor")
 
 
+def _assert_self_assignable(roles: list[str]) -> None:
+    """The role rules, in one place.
+
+    Registration and profile editing both apply them, and before this they
+    each had their own copy. Two copies of one rule is one rule and one
+    opportunity: adding a fourth role, or relaxing the admin rule, would have
+    to be remembered twice, and forgetting the second is how `admin` becomes
+    self-assignable through the endpoint nobody thought about.
+    """
+    if not roles:
+        # A user with no roles could do nothing and should not exist.
+        raise ValidationError("At least one role is required.")
+
+    invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
+    if invalid:
+        # Admin is granted, never claimed. Allowing it on either path would
+        # simply move the hole rather than close it - register as a student,
+        # then promote yourself.
+        #
+        # Say which roles are allowed as well as which were refused. An error
+        # that does not tell you what to do instead is half an error.
+        raise ValidationError(
+            f"Cannot self-assign: {', '.join(invalid)}.",
+            details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
+        )
+
+
 async def register_user(
     users: UserRepository,
     *,
@@ -51,17 +78,7 @@ async def register_user(
     # second one will be certain they already registered.
     email = email.strip().lower()
 
-    if not roles:
-        raise ValidationError("At least one role is required.")
-
-    invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
-    if invalid:
-        # Say which roles are allowed as well as which were refused. An error
-        # that does not tell you what to do instead is half an error.
-        raise ValidationError(
-            f"Cannot self-assign: {', '.join(invalid)}.",
-            details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
-        )
+    _assert_self_assignable(roles)
 
     if await users.get_by_email(email) is not None:
         raise ConflictError("That email is already registered.")
@@ -163,18 +180,7 @@ async def update_profile(
         user.full_name = full_name.strip()
 
     if roles is not None:
-        if not roles:
-            raise ValidationError("At least one role is required.")
-
-        invalid = sorted(set(roles) - set(SELF_ASSIGNABLE_ROLES))
-        if invalid:
-            # Same rule as registration: admin is granted, never claimed.
-            # Allowing it here would simply move the hole rather than close
-            # it - register as a student, then promote yourself.
-            raise ValidationError(
-                f"Cannot self-assign: {', '.join(invalid)}.",
-                details={"allowed": list(SELF_ASSIGNABLE_ROLES)},
-            )
+        _assert_self_assignable(roles)
 
         # Dropping `instructor` while still owning courses is allowed. The
         # courses stay theirs and simply cannot be edited until they take the
