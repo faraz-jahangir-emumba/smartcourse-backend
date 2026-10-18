@@ -1,0 +1,82 @@
+name: CI
+
+# Every push and every pull request. Tests that only run when somebody
+# remembers to run them are tests that stop running.
+#
+# No branch list on `push`, deliberately. A pattern like module-* silently
+# skips anything named differently - a hotfix branch, a spike - and a skipped
+# run looks exactly like a passing one. Running everywhere costs nothing on a
+# public repository.
+#
+# `pull_request` is kept even though push already covers the branch, because
+# it asks a different question: it builds a temporary merge of the branch with
+# main and tests *that*. A push run only tests the branch as it stands, so it
+# cannot see a failure that only appears once the two are combined.
+#
+# While a PR is open both fire, so those pushes produce two runs. With pull
+# requests opened at the end of a module that is a handful of duplicates per
+# module - not worth losing the merge check to avoid.
+on:
+  push:
+  pull_request:
+
+# Pushing again before a run finishes cancels the first. Only the newest
+# commit's result matters, and this stops a queue forming behind three pushes
+# in a row.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # The suite needs a real Postgres. Not a mock and not SQLite: the schema
+    # leans on things only Postgres has - DEFERRABLE constraints, partial
+    # unique indexes, text[] columns, SELECT ... FOR UPDATE. A different
+    # database would pass tests that say nothing about production.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: smartcourse
+          POSTGRES_PASSWORD: smartcourse
+          POSTGRES_DB: smartcourse
+        ports:
+          - 5432:5432
+        # Without this the job races the database and fails at the first
+        # connection. There is a gap of a few seconds between "container
+        # running" and "accepting connections".
+        options: >-
+          --health-cmd "pg_isready -U smartcourse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_USER: smartcourse
+      POSTGRES_PASSWORD: smartcourse
+      POSTGRES_DB: smartcourse
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      # conftest.py overrides POSTGRES_DB to smartcourse_test and creates it
+      # per run, so the value above is only used for the initial connection.
+      ENVIRONMENT: local
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Caches the dependency download between runs, keyed on uv.lock.
+          enable-cache: true
+
+      - name: Install dependencies
+        # --frozen fails if uv.lock does not match pyproject.toml, so a
+        # dependency added without updating the lockfile is caught here
+        # rather than working on one machine and not another.
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -v
