@@ -228,3 +228,21 @@ def test_no_text_is_lost() -> None:
     for ceiling in range(4, 40):
         result = chunk_text(text, max_tokens=ceiling, overlap_tokens=0)
         assert " ".join(result).split() == text.split(), ceiling
+
+
+def test_a_multi_sentence_paragraph_that_fits_is_not_split() -> None:
+    """The largest natural unit wins, and the unit is the paragraph.
+
+    Missed by every other test in this file, because they all use
+    single-sentence paragraphs - where splitting by sentence and splitting
+    by paragraph give the same answer. A misindented branch made the
+    paragraph check unreachable, so every paragraph was broken into
+    sentences regardless of size, and the suite stayed green. It surfaced
+    from a publishing test that happened to use two sentences.
+    """
+    paragraph = "Alpha one two three. Bravo four five six. Charlie seven eight."
+    assert estimate_tokens(paragraph) <= 30
+
+    result = chunk_text(paragraph, max_tokens=30, overlap_tokens=0)
+
+    assert result == [paragraph]

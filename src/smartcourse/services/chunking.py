@@ -95,9 +95,13 @@ def _split_to_fit(text: str, max_tokens: int) -> list[tuple[str, str]]:
         if not paragraph:
             continue
 
-            if estimate_tokens(paragraph) <= max_tokens:
-                parts.append(("\n\n", paragraph))
-                continue
+        # The normal path: a paragraph that already fits is kept whole.
+        # Indented one level too deep, this sat inside the empty-paragraph
+        # check above and was unreachable - so every paragraph was split
+        # into sentences regardless of size.
+        if estimate_tokens(paragraph) <= max_tokens:
+            parts.append(("\n\n", paragraph))
+            continue
 
         # Too big whole, so split it - but everything that comes out of one
         # paragraph belongs to it, and only the first piece starts a new one.
