@@ -787,3 +787,52 @@ async def test_prerequisites_set_through_the_api_block_enrollment(
 
     assert response.status_code == 409
     assert response.json()["error"]["details"]["missing"] == ["Python Basics"]
+
+
+# --- editing a published course, FR-04 -------------------------------------
+
+
+async def test_a_published_course_can_still_be_edited(
+    client: AsyncClient, instructor: dict, session: AsyncSession
+) -> None:
+    """Until Module 2 this was refused, and there was no way back from
+    ready - so a published course could never be corrected again, not even a
+    typo. Nothing in the brief asked for that.
+
+    The course stays ready. Students read lessons.content directly, so they
+    see the fix at once; what goes stale is the chunk index behind the
+    assistant, and republishing refreshes it cheaply.
+    """
+    course_id = await _make_course(client, instructor, title="Published")
+    await _publish(session, course_id)
+
+    response = await client.patch(
+        f"/courses/{course_id}", json={"title": "Corrected"}, headers=instructor
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Corrected"
+    assert response.json()["status"] == "ready"
+
+
+async def test_a_course_being_published_cannot_be_edited(
+    client: AsyncClient, instructor: dict, session: AsyncSession
+) -> None:
+    """The one status that is still closed.
+
+    The workflow is reading the content while it runs. An edit underneath it
+    would leave some chunks built from the old text and some from the new,
+    with no way to tell which.
+    """
+    course_id = await _make_course(client, instructor, title="Mid-publish")
+    course = await session.get(Course, UUID(course_id))
+    course.status = "publishing"
+    await session.flush()
+
+    response = await client.patch(
+        f"/courses/{course_id}", json={"title": "Sneaky"}, headers=instructor
+    )
+
+    assert response.status_code == 409
+    assert "publishing" in response.json()["error"]["message"]
+    assert "ready" in response.json()["error"]["details"]["editable_in"]

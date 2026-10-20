@@ -25,7 +25,14 @@ if TYPE_CHECKING:
 # The course state machine, from UC-01:
 #   draft -> publishing -> ready
 #                       -> failed -> publishing
-COURSE_STATUSES = ("draft", "publishing", "ready", "failed")
+# The four states a course can be in, named once. Same reasoning as the
+# roles in user.py: a mistyped status string is a silently false comparison.
+STATUS_DRAFT = "draft"
+STATUS_PUBLISHING = "publishing"
+STATUS_READY = "ready"
+STATUS_FAILED = "failed"
+
+COURSE_STATUSES = (STATUS_DRAFT, STATUS_PUBLISHING, STATUS_READY, STATUS_FAILED)
 
 # As a SQL literal, built from the tuple above rather than retyped. Same
 # reasoning as VALID_ROLES in user.py: two hand-written copies of one list
@@ -53,7 +60,7 @@ class Course(UUIDMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="draft", index=True
+        String(20), nullable=False, server_default=STATUS_DRAFT, index=True
     )
 
     # Nullable on purpose. NULL means unlimited, which is a different thing

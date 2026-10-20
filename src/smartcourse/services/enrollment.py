@@ -14,9 +14,9 @@ from smartcourse.domain.errors import (
     NotFoundError,
     PermissionDeniedError,
 )
-from smartcourse.infra.db.models.course import Course
+from smartcourse.infra.db.models.course import STATUS_READY, Course
 from smartcourse.infra.db.models.enrollment import Enrollment
-from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_STUDENT, User
 from smartcourse.infra.db.repositories import CourseRepository, EnrollmentRepository
 
 
@@ -40,13 +40,13 @@ async def enroll(
     # see drafts - _can_view in services/course.py already returns 404 for
     # them - and enrolling must agree, or it becomes a way to discover which
     # unpublished courses exist by trying to join them.
-    if course is None or course.status != "ready":
+    if course is None or course.status != STATUS_READY:
         raise NotFoundError("No course with that id.")
 
     # UC-07: an instructor who wants to learn adds the student role to the
     # account they already have. That only means something if the role is
     # what grants this.
-    if "student" not in user.roles:
+    if ROLE_STUDENT not in user.roles:
         raise PermissionDeniedError(
             "Enrolling requires the student role.",
             details={"hint": "Add it with PATCH /users/me."},
@@ -140,7 +140,7 @@ async def list_course_enrollments(
     if course is None:
         raise NotFoundError("No course with that id.")
 
-    if "admin" not in user.roles and course.instructor_id != user.id:
+    if ROLE_ADMIN not in user.roles and course.instructor_id != user.id:
         # 404, not 403. Consistent with the read rules in services/course.py:
         # confirming a course exists is itself information when the caller
         # has no business with it.

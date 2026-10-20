@@ -28,6 +28,7 @@ from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import UserRepository
 from smartcourse.infra.db.session import SessionFactory, dispose_engine
 from smartcourse.infra.security import hash_password
+from smartcourse.infra.db.models.user import ROLE_ADMIN
 
 # The same floor registration applies. An admin password should not be weaker
 # than a student's.
@@ -90,7 +91,7 @@ async def seed_admin() -> int:
                 email=email,
                 password=await hash_password(password),
                 full_name="Administrator",
-                roles=["admin"],
+                roles=[ROLE_ADMIN],
             )
         )
         # The repository flushes and never commits - that boundary belongs to

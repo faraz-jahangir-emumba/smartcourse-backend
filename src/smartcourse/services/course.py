@@ -23,22 +23,40 @@ from smartcourse.domain.errors import (
 )
 from smartcourse.infra.db.models.course import (
     COURSE_STATUSES,
+    STATUS_DRAFT,
+    STATUS_FAILED,
+    STATUS_READY,
     Course,
     Lesson,
     Module,
 )
-from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.models.user import (
+    ROLE_ADMIN,
+    ROLE_INSTRUCTOR,
+    User,
+)
 from smartcourse.infra.db.repositories import (
     CourseRepository,
     LessonRepository,
     ModuleRepository,
 )
 
-# Only a draft can be freely edited. Once a course is published students may
-# be part-way through it, so changing its shape underneath them is a different
-# problem - one Module 2 deals with properly. `failed` is editable because a
-# failed publish leaves a course that needs fixing.
-EDITABLE_STATUSES = ("draft", "failed")
+# Everything except a publish in progress.
+#
+# A published course is editable, which was not true until Module 2. Before
+# that only draft and failed were, and there was no way back from ready - so
+# a published course could never be corrected again, not even a typo. Nothing
+# in the brief asked for that; it was an oversight.
+#
+# Editing a ready course leaves it ready. Students read lessons.content
+# directly, so they see the correction at once; what goes stale is the chunk
+# index that feeds the assistant, and republishing refreshes it cheaply
+# because content_hash means only what changed is redone.
+#
+# `publishing` is excluded because the workflow is reading the content while
+# it runs. Editing underneath it would leave some chunks built from the old
+# text and some from the new, with no way to tell which.
+EDITABLE_STATUSES = (STATUS_DRAFT, STATUS_FAILED, STATUS_READY)
 
 
 def _assert_can_edit(course: Course, user: User) -> None:
@@ -55,7 +73,7 @@ def _assert_can_edit(course: Course, user: User) -> None:
     came from. A blanket 403 would leak the existence of drafts that the read
     endpoints deliberately hide.
     """
-    if "admin" in user.roles:
+    if ROLE_ADMIN in user.roles:
         return
     if course.instructor_id == user.id:
         return
@@ -79,11 +97,11 @@ def _can_view(course: Course, user: User) -> bool:
     they take the role back. Nothing is lost: the courses remain theirs and
     reappear the moment the role does.
     """
-    if course.status == "ready":
+    if course.status == STATUS_READY:
         return True
-    if "admin" in user.roles:
+    if ROLE_ADMIN in user.roles:
         return True
-    return course.instructor_id == user.id and "instructor" in user.roles
+    return course.instructor_id == user.id and ROLE_INSTRUCTOR in user.roles
 
 
 def _assert_editable(course: Course) -> None:
@@ -162,7 +180,7 @@ async def create_course(
             title=title.strip(),
             description=description,
             capacity=capacity,
-            status="draft",
+            status=STATUS_DRAFT,
         )
     )
 
@@ -198,14 +216,14 @@ async def list_courses(
     status they may not ask about is refused rather than quietly returning
     nothing - see below.
     """
-    is_admin = "admin" in user.roles
-    is_instructor = "instructor" in user.roles
+    is_admin = ROLE_ADMIN in user.roles
+    is_instructor = ROLE_INSTRUCTOR in user.roles
 
     if is_admin:
         visible_statuses = None  # no restriction
         also_owned_by = None
     else:
-        visible_statuses = ("ready",)
+        visible_statuses = (STATUS_READY,)
         # An instructor also sees their own drafts. A student owns nothing,
         # so this adds nothing for them.
         also_owned_by = user.id if is_instructor else None
@@ -213,7 +231,7 @@ async def list_courses(
     # Instructors and admins may filter by any status - the visibility rule
     # above already limits an instructor to their own unpublished work. A
     # student has exactly one meaningful value.
-    filterable = COURSE_STATUSES if (is_admin or is_instructor) else ("ready",)
+    filterable = COURSE_STATUSES if (is_admin or is_instructor) else (STATUS_READY,)
 
     if status is not None:
         if status not in COURSE_STATUSES:

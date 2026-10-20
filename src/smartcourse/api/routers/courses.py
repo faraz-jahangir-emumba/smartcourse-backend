@@ -38,11 +38,12 @@ from smartcourse.api.schemas.course import (
     ModuleUpdate,
 )
 from smartcourse.services import course as course_service
+from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_INSTRUCTOR
 
 router = APIRouter(tags=["courses"])
 
 # Named once, applied to every route that writes.
-InstructorOnly = Depends(require_roles("instructor", "admin"))
+InstructorOnly = Depends(require_roles(ROLE_INSTRUCTOR, ROLE_ADMIN))
 
 
 # --------------------------------------------------------------- courses ---
