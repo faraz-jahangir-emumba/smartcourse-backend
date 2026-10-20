@@ -136,12 +136,25 @@ class Chunk(UUIDMixin, Base):
         # would BOTH be allowed - exactly the duplicate this constraint exists
         # to prevent, and chunks from lessons.content always have a null
         # asset_id. Postgres 15+ can be told to treat nulls as equal.
+        # DEFERRABLE INITIALLY DEFERRED, for the same reason the module and
+        # lesson position constraints are: a republish reshuffles positions,
+        # and any order of statements collides part way through.
+        #
+        # Inserting a new chunk at position 1 while the old one is still
+        # there fails, and so does deleting first if two chunks swap places.
+        # Deferring moves the check to COMMIT, by which point the positions
+        # are consistent again - which is what "no duplicates" always meant.
+        #
+        # Missed when the table was designed. Found by the first republish
+        # test that edited a lesson rather than re-running it unchanged.
         UniqueConstraint(
             "lesson_id",
             "asset_id",
             "position",
             name="uq_chunks_source_position",
             postgresql_nulls_not_distinct=True,
+            deferrable=True,
+            initially="DEFERRED",
         ),
         CheckConstraint("position >= 0", name="ck_chunks_position_non_negative"),
         CheckConstraint("token_count > 0", name="ck_chunks_token_count_positive"),

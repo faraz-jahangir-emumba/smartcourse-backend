@@ -23,6 +23,7 @@ to fetch a course you do not own would be making a decision it has no business
 making - and the same query is needed by an admin who may.
 """
 
+from smartcourse.infra.db.repositories.chunk import ChunkRepository
 from smartcourse.infra.db.repositories.course import (
     CourseRepository,
     LessonRepository,
@@ -32,6 +33,7 @@ from smartcourse.infra.db.repositories.enrollment import EnrollmentRepository
 from smartcourse.infra.db.repositories.user import UserRepository
 
 __all__ = [
+    "ChunkRepository",
     "CourseRepository",
     "EnrollmentRepository",
     "LessonRepository",
