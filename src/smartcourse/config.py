@@ -47,6 +47,26 @@ class Settings(BaseSettings):
     # something that should reach a shared environment.
     db_echo: bool = False
 
+    # --- chunking ---------------------------------------------------------
+    # How publishing cuts lesson content into retrievable pieces. FR-11.
+    #
+    # Settings rather than constants because every one of these is a guess
+    # that cannot be checked until Module 4, when real questions can be run
+    # against real retrieval. Hard-coded, changing the answer is a day's work;
+    # here it is a line and a republish, and content_hash already makes a
+    # republish cheap.
+    #
+    # A ceiling, not a target: content that already fits is left alone. 400
+    # comes from what makes a chunk good - a few hundred tokens is a paragraph
+    # or two, usually one idea - and not from how long a lesson is. Longer
+    # lessons give more chunks, not bigger ones.
+    chunk_max_tokens: int = 400
+
+    # About 15%. Enough to carry two or three sentences across a cut, so an
+    # idea split by a boundary survives whole in one piece. Much more and you
+    # pay to embed the same text twice and get near-duplicate results.
+    chunk_overlap_tokens: int = 60
+
     # --- the first admin --------------------------------------------------
     # Read by `python -m smartcourse.seed`, which is the only way an admin
     # account can come into existence - admin is not self-assignable and
