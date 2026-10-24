@@ -293,6 +293,27 @@ class LessonRepository:
     async def get_by_id(self, lesson_id: UUID) -> Lesson | None:
         return await self._session.get(Lesson, lesson_id)
 
+    async def ids_for_course(self, course_id: UUID) -> list[UUID]:
+        """Every lesson in a course, in reading order.
+
+        Joined through modules, because a lesson row knows only its module
+        and the module knows the course. Ordered by the module's position
+        and then the lesson's, so publishing walks a course the way a
+        student reads it - which makes a workflow history legible when
+        something fails half way through.
+
+        Only the ids. The caller loads each lesson when it gets to it, so a
+        200-lesson course is not held in memory to be processed one at a
+        time.
+        """
+        rows = await self._session.scalars(
+            select(Lesson.id)
+            .join(Module, Lesson.module_id == Module.id)
+            .where(Module.course_id == course_id)
+            .order_by(Module.position, Lesson.position)
+        )
+        return list(rows)
+
     async def list_for_module(self, module_id: UUID) -> list[Lesson]:
         rows = await self._session.scalars(
             select(Lesson)

@@ -18,22 +18,6 @@ class ChunkRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lesson_ids_for_course(self, course_id: UUID) -> list[UUID]:
-        """Every lesson in a course, in reading order.
-
-        Joined through modules, because a lesson belongs to a module and only
-        a module knows its course. Ordered by the module's position and then
-        the lesson's, so publishing walks the course the way a student would
-        - which makes a workflow history readable when something goes wrong.
-        """
-        rows = await self._session.scalars(
-            select(Lesson.id)
-            .join(Module, Lesson.module_id == Module.id)
-            .where(Module.course_id == course_id)
-            .order_by(Module.position, Lesson.position)
-        )
-        return list(rows)
-
     async def existing_for_lesson(self, lesson_id: UUID) -> list[Chunk]:
         """A lesson's current chunks.
 

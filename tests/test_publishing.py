@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smartcourse.infra.db.models.content import Chunk
 from smartcourse.infra.db.models.course import Course, Lesson, Module
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.db.repositories import ChunkRepository
+from smartcourse.infra.db.repositories import ChunkRepository, LessonRepository
 from smartcourse.services.publishing import chunk_lesson, content_hash
 
 # Two paragraphs of 16 and 10 estimated tokens. A ceiling of 20 keeps each
@@ -217,7 +217,7 @@ async def test_lessons_come_back_in_reading_order(session: AsyncSession) -> None
     )
     await session.flush()
 
-    ids = await ChunkRepository(session).lesson_ids_for_course(module.course_id)
+    ids = await LessonRepository(session).ids_for_course(module.course_id)
 
     assert len(ids) == 3
     assert ids[0] == lesson.id

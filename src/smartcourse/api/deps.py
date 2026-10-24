@@ -10,7 +10,7 @@ how endpoints end up half-protected: something checks a token is valid and
 nobody checks the holder is allowed.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends
@@ -27,6 +27,7 @@ from smartcourse.infra.db.repositories import (
     UserRepository,
 )
 from smartcourse.infra.db.session import get_session
+from smartcourse.infra.temporal import get_temporal_client
 from smartcourse.infra.security import TokenError, decode_access_token
 
 # scope="function" is load-bearing, not decoration.
@@ -86,6 +87,18 @@ CourseRepo = Annotated[CourseRepository, Depends(get_course_repository)]
 ModuleRepo = Annotated[ModuleRepository, Depends(get_module_repository)]
 LessonRepo = Annotated[LessonRepository, Depends(get_lesson_repository)]
 EnrollmentRepo = Annotated[EnrollmentRepository, Depends(get_enrollment_repository)]
+
+def get_workflow_client() -> Any:
+    """The Temporal client, for endpoints that start a workflow.
+
+    A dependency rather than a direct import so a test can override it, the
+    same way get_session is overridden - otherwise every test touching
+    publish would need a running Temporal server.
+    """
+    return get_temporal_client()
+
+
+WorkflowClient = Annotated[Any, Depends(get_temporal_client)]
 
 # Reads the Authorization header and expects `Bearer <token>`.
 #

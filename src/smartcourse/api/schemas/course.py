@@ -81,6 +81,24 @@ class CourseSummary(BaseModel):
     title: str
 
 
+class PublishAccepted(BaseModel):
+    """What POST /courses/{id}/publish returns.
+
+    Not the course. The workflow has been accepted, not finished, and the
+    status in the database is still whatever it was a moment ago - handing
+    back a course that says "draft" straight after a publish request reads
+    like the request was ignored.
+
+    So this says plainly what happened and where to look next.
+    """
+
+    course_id: UUID
+    # Exposed deliberately. It is the handle for this publish in Temporal's
+    # web UI, which is where anyone debugging a stuck publish needs to go.
+    workflow_id: str
+    status_url: str
+
+
 class CourseCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str | None = None

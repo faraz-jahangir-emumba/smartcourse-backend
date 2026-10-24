@@ -14,8 +14,10 @@ Reading is open to anyone signed in; writing is not.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from smartcourse.api.deps import (
+    WorkflowClient,
     CourseRepo,
     CurrentUser,
     LessonRepo,
@@ -23,6 +25,7 @@ from smartcourse.api.deps import (
     require_roles,
 )
 from smartcourse.api.schemas.course import (
+    PublishAccepted,
     CourseCreate,
     CourseDetailResponse,
     CourseListResponse,
@@ -37,7 +40,14 @@ from smartcourse.api.schemas.course import (
     ModuleResponse,
     ModuleUpdate,
 )
+from smartcourse.domain.errors import ConflictError
 from smartcourse.services import course as course_service
+from smartcourse.services import publishing as publishing_service
+from smartcourse.workflows.publishing import (
+    TASK_QUEUE,
+    PublishCourseWorkflow,
+    workflow_id_for,
+)
 from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_INSTRUCTOR
 
 router = APIRouter(tags=["courses"])
@@ -152,6 +162,65 @@ async def delete_course(
 
 
 # --------------------------------------------------------------- modules ---
+
+
+@router.post(
+    "/courses/{course_id}/publish",
+    response_model=PublishAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Publish a course",
+)
+async def publish_course(
+    course_id: UUID,
+    courses: CourseRepo,
+    user: CurrentUser,
+    client: WorkflowClient,
+) -> PublishAccepted:
+    """202 Accepted, immediately. The work happens elsewhere.
+
+    Not 200, and not 201. 202 means "I have taken this and will do it",
+    which is exactly true: chunking a 200-lesson course is not something an
+    HTTP request should sit through, and the caller gets an answer in
+    milliseconds either way.
+
+    The permission check runs here rather than in the workflow. Refusing
+    belongs in the request that made it, where there is a caller to refuse;
+    a background job has already been accepted and has nobody to tell.
+
+    Every status write happens in the workflow, never here. Postgres and
+    Temporal share no transaction, so an endpoint doing both could do one
+    and not the other - commit first and a failed start strands the course
+    on `publishing`, start first and a failed commit leaves the workflow
+    running against a draft.
+    """
+    await publishing_service.assert_can_publish(
+        courses, course_id=course_id, user=user
+    )
+
+    workflow_id = workflow_id_for(str(course_id))
+
+    try:
+        await client.start_workflow(
+            PublishCourseWorkflow.run,
+            str(course_id),
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+        )
+    except WorkflowAlreadyStartedError as exc:
+        # Temporal refuses a second workflow with the same id while one is
+        # running. That is the real protection against a double-click, not
+        # the status check above - which two simultaneous requests would
+        # both pass.
+        raise ConflictError(
+            "This course is already being published.",
+            details={"workflow_id": workflow_id},
+        ) from exc
+
+    return PublishAccepted(
+        course_id=course_id,
+        workflow_id=workflow_id,
+        status_url=f"/api/v1/courses/{course_id}",
+    )
 
 
 @router.post(
