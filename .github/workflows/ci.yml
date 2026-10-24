@@ -84,5 +84,34 @@ jobs:
         # rather than working on one machine and not another.
         run: uv sync --frozen
 
+      # Temporal, for the publishing workflow tests.
+      #
+      # Started as a step rather than declared under `services:`, because a
+      # service container cannot override the image's command and the dev
+      # server needs `server start-dev`. Same image and same flags as
+      # compose.yml, so CI and a laptop run the same thing.
+      #
+      # Without this the six workflow tests skip rather than fail - and a
+      # skipped test in CI looks exactly like a passing one, which would
+      # leave FR-13's compensation unproven while the build stayed green.
+      - name: Start Temporal
+        run: |
+          docker run -d --name temporal -p 7233:7233             temporalio/temporal:latest             server start-dev --ip 0.0.0.0 --db-filename /home/temporal/temporal.db
+
+      # The same race as the Postgres health check: there is a gap between
+      # "container running" and "accepting connections".
+      - name: Wait for Temporal
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec temporal temporal operator cluster health                  --address localhost:7233 >/dev/null 2>&1; then
+              echo "Temporal is serving"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Temporal did not come up"
+          docker logs temporal
+          exit 1
+
       - name: Run tests
         run: uv run pytest -v
