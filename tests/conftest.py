@@ -44,9 +44,32 @@ from sqlalchemy.pool import NullPool  # noqa: E402
 
 from smartcourse.config import get_settings  # noqa: E402
 from smartcourse.infra.db.session import get_session  # noqa: E402
+from smartcourse.infra.temporal import get_temporal_client  # noqa: E402
 from smartcourse.main import create_app  # noqa: E402
 
 PASSWORD = "correct-horse-battery"
+
+
+class _StartedWorkflow:
+    """What start_workflow returns. Only the id is read."""
+
+    def __init__(self, workflow_id: str) -> None:
+        self.id = workflow_id
+
+
+class _StubWorkflowClient:
+    """Records what was started instead of starting it.
+
+    Enough for an endpoint test: the question there is whether the request
+    was accepted and what came back, not whether Temporal then ran it.
+    """
+
+    def __init__(self) -> None:
+        self.started: list[tuple] = []
+
+    async def start_workflow(self, run, *args, id: str, task_queue: str, **kw):
+        self.started.append((id, task_queue, args))
+        return _StartedWorkflow(id)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_DB = "smartcourse_test"
@@ -174,6 +197,15 @@ async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
     """
     app = create_app()
     app.dependency_overrides[get_session] = lambda: session
+
+    # A stub Temporal client, so endpoint tests do not need a workflow
+    # engine running. FastAPI resolves every dependency before calling the
+    # endpoint, so even a request that will be refused would otherwise try
+    # to connect - and a permission test would fail for the wrong reason.
+    #
+    # The real client is exercised by tests/test_publish_workflow.py, which
+    # needs a real server and says so.
+    app.dependency_overrides[get_temporal_client] = lambda: _StubWorkflowClient()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test/api/v1") as c:

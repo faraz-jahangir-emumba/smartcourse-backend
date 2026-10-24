@@ -176,6 +176,11 @@ async def delete_course(
     "/courses/{course_id}/publish",
     response_model=PublishAccepted,
     status_code=status.HTTP_202_ACCEPTED,
+    # The route asks "are you an instructor at all"; the service asks "is
+    # this your course". Publishing skipped the first half, so a student
+    # reached the ownership check and was told the course did not exist -
+    # about a course they could read in the catalogue.
+    dependencies=[InstructorOnly],
     summary="Publish a course",
 )
 async def publish_course(

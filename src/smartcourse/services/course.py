@@ -78,13 +78,18 @@ def _assert_can_edit(course: Course, user: User) -> None:
     if course.instructor_id == user.id:
         return
 
-    if _can_view(course, user):
+    if can_view(course, user):
         raise PermissionDeniedError("This course belongs to another instructor.")
     raise NotFoundError("No course with that id.")
 
 
-def _can_view(course: Course, user: User) -> bool:
+def can_view(course: Course, user: User) -> bool:
     """Whether this course is visible to this caller.
+
+    Public, and imported by services/publishing.py. Visibility is one rule
+    and every path that refuses something has to agree with it - a second
+    copy is how publishing ended up returning 404 for a course the caller
+    could plainly see in the catalogue.
 
     The single-course counterpart of the visibility filter in list_courses.
     Both express the same rule, and they have to: a filtered list with a
@@ -284,7 +289,7 @@ async def get_course_detail(
     if course is None:
         raise NotFoundError("No course with that id.")
 
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No course with that id.")
 
     return course
@@ -309,7 +314,7 @@ async def get_module_detail(
         raise NotFoundError("No module with that id.")
 
     course = await _course_or_404(courses, module.course_id)
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No module with that id.")
 
     return module
@@ -334,7 +339,7 @@ async def get_lesson_detail(
     module = await _module_or_404(modules, lesson.module_id)
     course = await _course_or_404(courses, module.course_id)
 
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No lesson with that id.")
 
     return lesson, course.id
@@ -448,7 +453,7 @@ async def list_lessons(
     other read: confirming a draft exists is itself information.
     """
     course = await _course_or_404(courses, course_id)
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No course with that id.")
 
     return await lessons.list_for_course(

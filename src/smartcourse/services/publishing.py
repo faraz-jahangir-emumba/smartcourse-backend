@@ -22,6 +22,7 @@ from smartcourse.infra.db.models.user import (
 )
 from smartcourse.infra.db.repositories import ChunkRepository, CourseRepository
 from smartcourse.services.chunking import chunk_text, estimate_tokens
+from smartcourse.services.course import can_view
 from smartcourse.infra.db.models.course import STATUS_DRAFT, STATUS_FAILED
 
 # Only these can be published. `publishing` is excluded so a second publish
@@ -58,19 +59,35 @@ async def assert_can_publish(
     if course is None:
         raise NotFoundError("No course with that id.")
 
-    if ROLE_ADMIN not in user.roles and course.instructor_id != user.id:
-        # 404 rather than 403, matching every other read of a course the
-        # caller has no claim to: confirming it exists is itself information.
+    # Which refusal depends on whether they can see the course at all, the
+    # same way editing decides it:
+    #
+    #     cannot see it (someone else's draft)  -> 404, same as a read
+    #     can see it but may not publish it     -> 403
+    #
+    # The first version returned 404 for every non-owner, which meant a
+    # student looking at a published course in the catalogue was told it
+    # did not exist. That contradicts the screen they came from, and it is
+    # exactly the inconsistency the Week 1 review removed from editing.
+    if not can_view(course, user):
         raise NotFoundError("No course with that id.")
+
+    if ROLE_ADMIN not in user.roles:
+        # Role first, then ownership. For a student, "publishing requires
+        # the instructor role" is the useful answer; "this belongs to
+        # another instructor" would be true and beside the point.
+        if ROLE_INSTRUCTOR not in user.roles:
+            raise PermissionDeniedError("Publishing requires the instructor role.")
+        if course.instructor_id != user.id:
+            raise PermissionDeniedError(
+                "This course belongs to another instructor."
+            )
 
     if course.status not in PUBLISHABLE_STATUSES:
         raise ConflictError(
             f"A course in '{course.status}' cannot be published.",
             details={"publishable_from": list(PUBLISHABLE_STATUSES)},
         )
-
-    if ROLE_INSTRUCTOR not in user.roles and ROLE_ADMIN not in user.roles:
-        raise PermissionDeniedError("Publishing requires the instructor role.")
 
     return course
 

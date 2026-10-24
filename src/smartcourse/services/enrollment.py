@@ -37,7 +37,7 @@ async def enroll(
     course = await courses.get_by_id(course_id)
 
     # 404 rather than "that course is not published yet". A student cannot
-    # see drafts - _can_view in services/course.py already returns 404 for
+    # see drafts - can_view in services/course.py already returns 404 for
     # them - and enrolling must agree, or it becomes a way to discover which
     # unpublished courses exist by trying to join them.
     if course is None or course.status != STATUS_READY:
