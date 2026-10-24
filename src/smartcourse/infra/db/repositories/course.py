@@ -23,6 +23,27 @@ from smartcourse.infra.db.models.course import (
 )
 
 
+def _matches(column, query: str):
+    """A full-text match against a generated tsvector column.
+
+    websearch_to_tsquery rather than plainto_tsquery. It understands what
+    people type into a search box - quoted "exact phrases", OR, and -minus
+    to exclude - and, crucially, it never raises on malformed input.
+    to_tsquery would: a stray & or | from a user is a syntax error and a
+    500.
+    """
+    return column.op("@@")(func.websearch_to_tsquery("english", query))
+
+
+def _rank(column, query: str):
+    """How well a row matches, for ordering.
+
+    ts_rank reads the weights set by the generated column, so a title match
+    outranks a body match rather than both counting the same.
+    """
+    return func.ts_rank(column, func.websearch_to_tsquery("english", query))
+
+
 class CourseRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -146,6 +167,7 @@ class CourseRepository:
         instructor_id: UUID | None = None,
         visible_statuses: tuple[str, ...] | None = None,
         also_owned_by: UUID | None = None,
+        search: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[Course], int]:
@@ -169,6 +191,12 @@ class CourseRepository:
         if instructor_id is not None:
             filters.append(Course.instructor_id == instructor_id)
 
+        # FR-05's "search published courses". A filter like any other, so
+        # it combines with the visibility rules rather than bypassing them -
+        # searching cannot surface a draft that listing would hide.
+        if search:
+            filters.append(_matches(Course.search_vector, search))
+
         if visible_statuses is not None:
             # "courses in these states, or ones I own" - so an instructor sees
             # their own drafts without seeing anyone else's.
@@ -180,14 +208,23 @@ class CourseRepository:
         total = await self._session.scalar(
             select(func.count()).select_from(Course).where(*filters)
         )
+        # Newest first when browsing; best match first when searching.
+        # Sorting search results by date would bury the course somebody
+        # actually asked for under whatever was created most recently.
+        #
+        # Course.id still breaks ties in both cases. Without a total order
+        # paging is unreliable - Postgres may return equal rows in a
+        # different order between queries, so page 2 can repeat or skip
+        # rows from page 1 - and two courses can easily share a rank.
+        if search:
+            ordering = (_rank(Course.search_vector, search).desc(), Course.id)
+        else:
+            ordering = (Course.created_at.desc(), Course.id)
+
         rows = await self._session.scalars(
             select(Course)
             .where(*filters)
-            # A stable, total order. Without one, paging is unreliable:
-            # Postgres may return rows differently between queries, so page 2
-            # can repeat or skip rows from page 1. created_at alone is not
-            # enough - two courses can share a timestamp - so id breaks ties.
-            .order_by(Course.created_at.desc(), Course.id)
+            .order_by(*ordering)
             .limit(limit)
             .offset(offset)
         )
@@ -313,6 +350,44 @@ class LessonRepository:
             .order_by(Module.position, Lesson.position)
         )
         return list(rows)
+
+    async def list_for_course(
+        self,
+        course_id: UUID,
+        *,
+        search: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[Lesson], int]:
+        """A course's lessons, optionally filtered by a search. FR-10c.
+
+        Scoped to one course rather than searching everything, because that
+        is the question a student actually has: they are reading a course
+        and want the lesson that covers something. A global search would
+        also have to filter by what each course's owner allows them to see,
+        on every row.
+
+        Reading order when browsing, best match first when searching.
+        """
+        joined = select(Lesson).join(Module, Lesson.module_id == Module.id)
+        filters = [Module.course_id == course_id]
+
+        if search:
+            filters.append(_matches(Lesson.search_vector, search))
+            ordering = (_rank(Lesson.search_vector, search).desc(), Lesson.id)
+        else:
+            ordering = (Module.position, Lesson.position)
+
+        total = await self._session.scalar(
+            select(func.count())
+            .select_from(Lesson)
+            .join(Module, Lesson.module_id == Module.id)
+            .where(*filters)
+        )
+        rows = await self._session.scalars(
+            joined.where(*filters).order_by(*ordering).limit(limit).offset(offset)
+        )
+        return list(rows), int(total or 0)
 
     async def list_for_module(self, module_id: UUID) -> list[Lesson]:
         rows = await self._session.scalars(

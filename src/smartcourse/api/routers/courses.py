@@ -25,6 +25,7 @@ from smartcourse.api.deps import (
     require_roles,
 )
 from smartcourse.api.schemas.course import (
+    LessonListResponse,
     PublishAccepted,
     CourseCreate,
     CourseDetailResponse,
@@ -88,6 +89,12 @@ async def list_courses(
     instructor_id: UUID | None = None,
     # Bounded on purpose. Without a ceiling, `?limit=1000000` is a way to make
     # the server build an enormous response on demand.
+    q: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Free text. Searches titles and descriptions.",
+    ),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> CourseListResponse:
@@ -96,6 +103,7 @@ async def list_courses(
         user=user,
         status=status_filter,
         instructor_id=instructor_id,
+        search=q,
         limit=limit,
         offset=offset,
     )
@@ -243,6 +251,53 @@ async def add_module(
         courses, modules, course_id=course_id, user=user, title=payload.title
     )
     return ModuleResponse.model_validate(module)
+
+
+@router.get(
+    "/courses/{course_id}/lessons",
+    response_model=LessonListResponse,
+    summary="A course's lessons, or search within them",
+)
+async def list_lessons(
+    course_id: UUID,
+    courses: CourseRepo,
+    lessons: LessonRepo,
+    user: CurrentUser,
+    q: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Free text. Searches lesson titles and content.",
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> LessonListResponse:
+    """FR-10c. Reading order when browsing, best match first when searching.
+
+    A noun with an optional filter rather than a /search verb. Listing a
+    course's lessons is useful on its own - there was no flat list before
+    this, only the whole nested course - and searching is that same list,
+    narrowed.
+
+    Scoped to one course because that is the question a student has: they
+    are reading something and want the lesson that covers a topic. A global
+    search would have to apply every course's visibility rules row by row.
+    """
+    items, total = await course_service.list_lessons(
+        courses,
+        lessons,
+        course_id=course_id,
+        user=user,
+        search=q,
+        limit=limit,
+        offset=offset,
+    )
+    return LessonListResponse(
+        items=[LessonResponse.model_validate(lesson) for lesson in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get(

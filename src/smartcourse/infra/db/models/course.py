@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
+    Index,
     DateTime,
     ForeignKey,
     Integer,
@@ -14,7 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from smartcourse.infra.db.base import Base, TimestampMixin, UUIDMixin
@@ -68,6 +70,29 @@ class Course(UUIDMixin, TimestampMixin, Base):
     capacity: Mapped[int | None] = mapped_column(Integer)
 
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # What FR-05's "search published courses" actually searches.
+    #
+    # A generated column: Postgres computes it on every insert and update,
+    # so no code path - a migration, a seed script, somebody fixing a title
+    # by hand in psql - can leave it stale. The alternative, maintaining it
+    # in application code or a trigger, is a thing that can be forgotten.
+    #
+    # setweight ranks a title match above a description match, so a course
+    # *called* "Python" beats one that mentions Python in passing.
+    #
+    # Server-side only. SQLAlchemy never writes it, and nothing reads it as
+    # an attribute - it exists to be queried with @@ and ranked with
+    # ts_rank, which the repository does.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(description, '')), 'B')",
+            persisted=True,
+        ),
+        nullable=False,
+    )
 
     instructor: Mapped["User"] = relationship(
         back_populates="courses", lazy="raise"
@@ -131,6 +156,10 @@ class Course(UUIDMixin, TimestampMixin, Base):
         ),
         # Zero capacity would mean a course nobody can ever join.
         CheckConstraint("capacity IS NULL OR capacity > 0", name="ck_courses_capacity_positive"),
+        # GIN, not btree. A tsvector holds many words per row and the
+        # question asked of it is "which rows contain this word" - which is
+        # what an inverted index answers and a btree cannot.
+        Index("ix_courses_search", "search_vector", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:
@@ -276,6 +305,17 @@ class Lesson(UUIDMixin, TimestampMixin, Base):
     # into chunks, and the assistant searches those chunks in UC-05.
     content: Mapped[str | None] = mapped_column(Text)
 
+    # FR-10c. Same reasoning as the one on courses, over title and content.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(content, '')), 'B')",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+
     position: Mapped[int] = mapped_column(Integer)
 
     module: Mapped["Module"] = relationship(back_populates="lessons", lazy="raise")
@@ -289,6 +329,7 @@ class Lesson(UUIDMixin, TimestampMixin, Base):
             initially="DEFERRED",
         ),
         CheckConstraint("position >= 0", name="ck_lessons_position_non_negative"),
+        Index("ix_lessons_search", "search_vector", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:

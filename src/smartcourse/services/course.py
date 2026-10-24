@@ -196,6 +196,7 @@ async def list_courses(
     user: User,
     status: str | None = None,
     instructor_id: UUID | None = None,
+    search: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[Course], int]:
@@ -259,6 +260,9 @@ async def list_courses(
         instructor_id=instructor_id,
         visible_statuses=visible_statuses,
         also_owned_by=also_owned_by,
+        # Narrows the same visibility rules rather than replacing them, so
+        # a search cannot surface a draft that listing would hide.
+        search=search,
         limit=limit,
         offset=offset,
     )
@@ -421,6 +425,35 @@ async def _set_prerequisites(
         )
 
     await courses.replace_prerequisites(course.id, list(wanted))
+
+
+async def list_lessons(
+    courses: CourseRepository,
+    lessons: LessonRepository,
+    *,
+    course_id: UUID,
+    user: User,
+    search: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[Lesson], int]:
+    """A course's lessons, optionally searched. FR-10c.
+
+    The visibility check runs on the *course*, once, before any lesson is
+    read. Lessons have no visibility of their own - they are visible
+    exactly when their course is - and checking per lesson would be the
+    same question asked N times with more chances to get it wrong.
+
+    404 rather than 403 for a course the caller cannot see, matching every
+    other read: confirming a draft exists is itself information.
+    """
+    course = await _course_or_404(courses, course_id)
+    if not _can_view(course, user):
+        raise NotFoundError("No course with that id.")
+
+    return await lessons.list_for_course(
+        course_id, search=search, limit=limit, offset=offset
+    )
 
 
 async def delete_course(

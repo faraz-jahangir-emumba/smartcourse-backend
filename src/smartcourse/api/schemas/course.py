@@ -81,6 +81,15 @@ class CourseSummary(BaseModel):
     title: str
 
 
+class LessonListResponse(BaseModel):
+    """A page of lessons, same shape as every other list in this API."""
+
+    items: list[LessonResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class PublishAccepted(BaseModel):
     """What POST /courses/{id}/publish returns.
 
