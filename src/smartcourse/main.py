@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from smartcourse.api.errors import register_exception_handlers
-from smartcourse.api.routers import auth, courses, users
+from smartcourse.api.routers import auth, courses, enrollment, users
 from smartcourse.infra.db.session import dispose_engine
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     api_v1.include_router(auth.router)
     api_v1.include_router(courses.router)
     api_v1.include_router(users.router)
+    api_v1.include_router(enrollment.router)
     app.include_router(api_v1)
 
     @app.get("/health", tags=["health"])

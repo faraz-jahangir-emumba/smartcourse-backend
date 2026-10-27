@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from smartcourse.infra.db.models.user import ROLE_STUDENT
+
 
 class RegisterRequest(BaseModel):
     """What a caller sends to POST /auth/register.
@@ -31,7 +33,7 @@ class RegisterRequest(BaseModel):
     )
     full_name: str = Field(min_length=1, max_length=200)
     roles: list[str] = Field(
-        default=["student"],
+        default=[ROLE_STUDENT],
         description="student and/or instructor. Admin cannot be self-assigned.",
     )
 

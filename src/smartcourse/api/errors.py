@@ -49,8 +49,12 @@ _CONFLICT_BY_CONSTRAINT: dict[str, str] = {
     # Not uq_users_email: the column is declared unique=True, so SQLAlchemy
     # names the index ix_users_email rather than giving it a uq_ prefix.
     "ix_users_email": "That email is already registered.",
-    "uq_modules_course_position": "Another module was added at the same time. Try again.",
-    "uq_lessons_module_position": "Another lesson was added at the same time. Try again.",
+    "uq_modules_course_position": (
+        "Another module was added at the same time. Try again."
+    ),
+    "uq_lessons_module_position": (
+        "Another lesson was added at the same time. Try again."
+    ),
     "uq_enrollments_one_active": "You are already enrolled in this course.",
     "uq_lesson_progress_once": "That lesson is already marked complete.",
     "uq_chunks_source_position": "That chunk already exists.",

@@ -23,22 +23,41 @@ from smartcourse.domain.errors import (
 )
 from smartcourse.infra.db.models.course import (
     COURSE_STATUSES,
+    STATUS_DRAFT,
+    STATUS_FAILED,
+    STATUS_READY,
     Course,
     Lesson,
     Module,
 )
-from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.models.user import (
+    ROLE_ADMIN,
+    ROLE_INSTRUCTOR,
+    User,
+)
 from smartcourse.infra.db.repositories import (
     CourseRepository,
+    EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
 )
 
-# Only a draft can be freely edited. Once a course is published students may
-# be part-way through it, so changing its shape underneath them is a different
-# problem - one Module 2 deals with properly. `failed` is editable because a
-# failed publish leaves a course that needs fixing.
-EDITABLE_STATUSES = ("draft", "failed")
+# Everything except a publish in progress.
+#
+# A published course is editable, which was not true until Module 2. Before
+# that only draft and failed were, and there was no way back from ready - so
+# a published course could never be corrected again, not even a typo. Nothing
+# in the brief asked for that; it was an oversight.
+#
+# Editing a ready course leaves it ready. Students read lessons.content
+# directly, so they see the correction at once; what goes stale is the chunk
+# index that feeds the assistant, and republishing refreshes it cheaply
+# because content_hash means only what changed is redone.
+#
+# `publishing` is excluded because the workflow is reading the content while
+# it runs. Editing underneath it would leave some chunks built from the old
+# text and some from the new, with no way to tell which.
+EDITABLE_STATUSES = (STATUS_DRAFT, STATUS_FAILED, STATUS_READY)
 
 
 def _assert_can_edit(course: Course, user: User) -> None:
@@ -55,18 +74,23 @@ def _assert_can_edit(course: Course, user: User) -> None:
     came from. A blanket 403 would leak the existence of drafts that the read
     endpoints deliberately hide.
     """
-    if "admin" in user.roles:
+    if ROLE_ADMIN in user.roles:
         return
     if course.instructor_id == user.id:
         return
 
-    if _can_view(course, user):
+    if can_view(course, user):
         raise PermissionDeniedError("This course belongs to another instructor.")
     raise NotFoundError("No course with that id.")
 
 
-def _can_view(course: Course, user: User) -> bool:
+def can_view(course: Course, user: User) -> bool:
     """Whether this course is visible to this caller.
+
+    Public, and imported by services/publishing.py. Visibility is one rule
+    and every path that refuses something has to agree with it - a second
+    copy is how publishing ended up returning 404 for a course the caller
+    could plainly see in the catalogue.
 
     The single-course counterpart of the visibility filter in list_courses.
     Both express the same rule, and they have to: a filtered list with a
@@ -79,11 +103,43 @@ def _can_view(course: Course, user: User) -> bool:
     they take the role back. Nothing is lost: the courses remain theirs and
     reappear the moment the role does.
     """
-    if course.status == "ready":
+    if course.status == STATUS_READY:
         return True
-    if "admin" in user.roles:
+    if ROLE_ADMIN in user.roles:
         return True
-    return course.instructor_id == user.id and "instructor" in user.roles
+    return course.instructor_id == user.id and ROLE_INSTRUCTOR in user.roles
+
+
+async def may_read_content(
+    course: Course, user: User, enrollments: EnrollmentRepository
+) -> bool:
+    """Whether this caller may read the lesson material, not just the shape.
+
+    Seeing a course and reading it are two different permissions, and until
+    Module 2 they were the same one: any signed-in user got the full text of
+    every published course, which made enrolment a formality.
+
+    The split is what a catalogue needs. You cannot decide whether to enrol
+    without seeing the syllabus - module and lesson titles - and you should
+    not get the material without enrolling. Part A §1 reads in that order:
+    "students browse courses, enroll, ... and interact with content".
+
+    Three ways through:
+
+        the owning instructor   it is their course
+        an admin                consistent with seeing and editing anything
+        an active enrollment    FR-06's one-per-course row
+
+    A withdrawn enrollment does not count. Leaving a course and keeping the
+    material would make withdrawing free.
+    """
+    if ROLE_ADMIN in user.roles:
+        return True
+    if course.instructor_id == user.id:
+        return True
+
+    active = await enrollments.get_active(student_id=user.id, course_id=course.id)
+    return active is not None
 
 
 def _assert_editable(course: Course) -> None:
@@ -149,21 +205,27 @@ async def create_course(
     title: str,
     description: str | None,
     capacity: int | None,
+    prerequisite_ids: list[UUID] | None = None,
 ) -> Course:
     """Create a draft course owned by this instructor. FR-04.
 
     Status is not a parameter. A course always starts as a draft - you
     publish it later, and the status follows from how that goes.
     """
-    return await courses.add(
+    course = await courses.add(
         Course(
             instructor_id=instructor.id,
             title=title.strip(),
             description=description,
             capacity=capacity,
-            status="draft",
+            status=STATUS_DRAFT,
         )
     )
+
+    if prerequisite_ids is not None:
+        await _set_prerequisites(courses, course=course, ids=prerequisite_ids)
+
+    return course
 
 
 async def list_courses(
@@ -172,6 +234,7 @@ async def list_courses(
     user: User,
     status: str | None = None,
     instructor_id: UUID | None = None,
+    search: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[Course], int]:
@@ -192,14 +255,14 @@ async def list_courses(
     status they may not ask about is refused rather than quietly returning
     nothing - see below.
     """
-    is_admin = "admin" in user.roles
-    is_instructor = "instructor" in user.roles
+    is_admin = ROLE_ADMIN in user.roles
+    is_instructor = ROLE_INSTRUCTOR in user.roles
 
     if is_admin:
         visible_statuses = None  # no restriction
         also_owned_by = None
     else:
-        visible_statuses = ("ready",)
+        visible_statuses = (STATUS_READY,)
         # An instructor also sees their own drafts. A student owns nothing,
         # so this adds nothing for them.
         also_owned_by = user.id if is_instructor else None
@@ -207,7 +270,7 @@ async def list_courses(
     # Instructors and admins may filter by any status - the visibility rule
     # above already limits an instructor to their own unpublished work. A
     # student has exactly one meaningful value.
-    filterable = COURSE_STATUSES if (is_admin or is_instructor) else ("ready",)
+    filterable = COURSE_STATUSES if (is_admin or is_instructor) else (STATUS_READY,)
 
     if status is not None:
         if status not in COURSE_STATUSES:
@@ -235,14 +298,21 @@ async def list_courses(
         instructor_id=instructor_id,
         visible_statuses=visible_statuses,
         also_owned_by=also_owned_by,
+        # Narrows the same visibility rules rather than replacing them, so
+        # a search cannot surface a draft that listing would hide.
+        search=search,
         limit=limit,
         offset=offset,
     )
 
 
 async def get_course_detail(
-    courses: CourseRepository, *, course_id: UUID, user: User
-) -> Course:
+    courses: CourseRepository,
+    enrollments: EnrollmentRepository,
+    *,
+    course_id: UUID,
+    user: User,
+) -> tuple[Course, bool]:
     """One course with its modules and lessons.
 
     The same visibility rule as the listing, and it has to be here too -
@@ -256,20 +326,23 @@ async def get_course_detail(
     if course is None:
         raise NotFoundError("No course with that id.")
 
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No course with that id.")
 
-    return course
+    # The course and whether its material may be read. Two different
+    # permissions: seeing the syllabus is how somebody decides to enrol.
+    return course, await may_read_content(course, user, enrollments)
 
 
 async def get_module_detail(
     courses: CourseRepository,
     modules: ModuleRepository,
+    enrollments: EnrollmentRepository,
     *,
     module_id: UUID,
     user: User,
-) -> Module:
-    """One module with its lessons.
+) -> tuple[Module, bool]:
+    """One module with its lessons, and whether they may be read.
 
     Visibility is decided by the parent course, never by the module itself.
     Without walking up, this endpoint would be a way round the course rule:
@@ -281,16 +354,23 @@ async def get_module_detail(
         raise NotFoundError("No module with that id.")
 
     course = await _course_or_404(courses, module.course_id)
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No module with that id.")
 
-    return module
+    # Walking up decides two things, not one. Visibility above, and whether
+    # the material may be read - this endpoint returns lessons, so leaving
+    # the second out made it a way round the enrolment gate, one module at
+    # a time. Found by hand after the other three paths were done, which is
+    # the point: "apply the rule on every path out" is easy to write and
+    # easy to miss one of.
+    return module, await may_read_content(course, user, enrollments)
 
 
 async def get_lesson_detail(
     courses: CourseRepository,
     modules: ModuleRepository,
     lessons: LessonRepository,
+    enrollments: EnrollmentRepository,
     *,
     lesson_id: UUID,
     user: User,
@@ -306,8 +386,19 @@ async def get_lesson_detail(
     module = await _module_or_404(modules, lesson.module_id)
     course = await _course_or_404(courses, module.course_id)
 
-    if not _can_view(course, user):
+    if not can_view(course, user):
         raise NotFoundError("No lesson with that id.")
+
+    # 403 here, where the listing instead returns the lesson without its
+    # text. The difference is what the caller asked for: a listing is the
+    # syllabus and is meant to be browsed, while fetching one lesson is
+    # asking for the material itself. Handing back a title and nothing else
+    # would be an odd way to say no.
+    if not await may_read_content(course, user, enrollments):
+        raise PermissionDeniedError(
+            "Enrol in this course to read its lessons.",
+            details={"course_id": str(course.id)},
+        )
 
     return lesson, course.id
 
@@ -322,6 +413,7 @@ async def update_course(
     description: str | None = None,
     capacity: int | None = None,
     module_order: list[UUID] | None = None,
+    prerequisite_ids: list[UUID] | None = None,
 ) -> Course:
     """Change a course. Only the fields that were sent.
 
@@ -344,7 +436,89 @@ async def update_course(
         _reposition(existing, module_order, "module_order")
         await modules.flush()
 
+    # An empty list clears them; an omitted field leaves them alone. That is
+    # the difference between "this course has no prerequisites" and "I was
+    # not talking about prerequisites".
+    if prerequisite_ids is not None:
+        await _set_prerequisites(courses, course=course, ids=prerequisite_ids)
+
     return course
+
+
+async def _set_prerequisites(
+    courses: CourseRepository, *, course: Course, ids: list[UUID]
+) -> None:
+    """Replace a course's prerequisites. FR-08.
+
+    Three refusals, each for a different kind of mistake.
+    """
+    wanted = set(ids)
+
+    if course.id in wanted:
+        # The database has CHECK (course_id <> prerequisite_course_id), so
+        # this is already impossible. The check is here for the message - a
+        # constraint violation tells the instructor nothing useful.
+        raise ValidationError("A course cannot be its own prerequisite.")
+
+    missing = wanted - await courses.existing_ids(wanted)
+    if missing:
+        raise ValidationError(
+            "Some of those courses do not exist.",
+            details={"unknown": sorted(str(i) for i in missing)},
+        )
+
+    # One hop only, and that is a deliberate limit.
+    #
+    # If B already requires A, then A requiring B closes a loop and both
+    # become permanently unenrollable - silently, because nothing errors.
+    # Students simply can never get in.
+    #
+    # Longer chains - A needs B, B needs C, C needs A - are not caught. That
+    # is FR-08a, which needs a recursive walk of the whole graph, and which
+    # was dropped from Module 2 on 8 October because nothing in the brief
+    # asks for it. A two-course loop is something an instructor does by
+    # accident; a three-course loop takes real determination. See STATE.md.
+    dependents = await courses.required_by(course.id)
+    conflicts = wanted & dependents
+    if conflicts:
+        titles = await courses.titles_for(conflicts)
+        raise ValidationError(
+            "That would make two courses require each other.",
+            details={"conflicts_with": sorted(titles.values())},
+        )
+
+    await courses.replace_prerequisites(course.id, list(wanted))
+
+
+async def list_lessons(
+    courses: CourseRepository,
+    lessons: LessonRepository,
+    enrollments: EnrollmentRepository,
+    *,
+    course_id: UUID,
+    user: User,
+    search: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[Lesson], int, bool]:
+    """A course's lessons, optionally searched. FR-10c.
+
+    The visibility check runs on the *course*, once, before any lesson is
+    read. Lessons have no visibility of their own - they are visible
+    exactly when their course is - and checking per lesson would be the
+    same question asked N times with more chances to get it wrong.
+
+    404 rather than 403 for a course the caller cannot see, matching every
+    other read: confirming a draft exists is itself information.
+    """
+    course = await _course_or_404(courses, course_id)
+    if not can_view(course, user):
+        raise NotFoundError("No course with that id.")
+
+    items, total = await lessons.list_for_course(
+        course_id, search=search, limit=limit, offset=offset
+    )
+    return items, total, await may_read_content(course, user, enrollments)
 
 
 async def delete_course(

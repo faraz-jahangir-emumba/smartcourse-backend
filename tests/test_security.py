@@ -12,7 +12,6 @@ import time
 from httpx import AsyncClient
 
 from smartcourse.infra.security import hash_password
-
 from tests.conftest import PASSWORD, register
 
 

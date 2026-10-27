@@ -10,7 +10,7 @@ how endpoints end up half-protected: something checks a token is valid and
 nobody checks the holder is allowed.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends
@@ -21,12 +21,14 @@ from smartcourse.domain.errors import AuthenticationError, PermissionDeniedError
 from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import (
     CourseRepository,
+    EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
     UserRepository,
 )
 from smartcourse.infra.db.session import get_session
 from smartcourse.infra.security import TokenError, decode_access_token
+from smartcourse.infra.temporal import get_temporal_client
 
 # scope="function" is load-bearing, not decoration.
 #
@@ -70,12 +72,33 @@ def get_lesson_repository(session: SessionDep) -> LessonRepository:
     return LessonRepository(session)
 
 
-# All three resolve to the same session within one request - FastAPI calls
+def get_enrollment_repository(session: SessionDep) -> EnrollmentRepository:
+    return EnrollmentRepository(session)
+
+
+# All of these resolve to the same session within one request - FastAPI calls
 # each dependency once and reuses the result - so an endpoint touching a
 # course and its modules works in a single transaction.
+#
+# Enrollment depends on that being true rather than merely convenient: the
+# row lock it takes on a course is held by the session's transaction, and an
+# endpoint holding two sessions would lock in one and insert in the other.
 CourseRepo = Annotated[CourseRepository, Depends(get_course_repository)]
 ModuleRepo = Annotated[ModuleRepository, Depends(get_module_repository)]
 LessonRepo = Annotated[LessonRepository, Depends(get_lesson_repository)]
+EnrollmentRepo = Annotated[EnrollmentRepository, Depends(get_enrollment_repository)]
+
+def get_workflow_client() -> Any:
+    """The Temporal client, for endpoints that start a workflow.
+
+    A dependency rather than a direct import so a test can override it, the
+    same way get_session is overridden - otherwise every test touching
+    publish would need a running Temporal server.
+    """
+    return get_temporal_client()
+
+
+WorkflowClient = Annotated[Any, Depends(get_temporal_client)]
 
 # Reads the Authorization header and expects `Bearer <token>`.
 #
@@ -133,7 +156,7 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_roles(*allowed: str):  # noqa: ANN201 - returns a FastAPI dependency
+def require_roles(*allowed: str):
     """Build a dependency that admits only these roles. FR-03.
 
     Used as:

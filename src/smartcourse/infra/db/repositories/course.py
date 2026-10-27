@@ -11,11 +11,37 @@ live in the service, because they are business rules.
 
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from smartcourse.infra.db.models.course import Course, Lesson, Module
+from smartcourse.infra.db.models.course import (
+    Course,
+    CoursePrerequisite,
+    Lesson,
+    Module,
+)
+
+
+def _matches(column, query: str):
+    """A full-text match against a generated tsvector column.
+
+    websearch_to_tsquery rather than plainto_tsquery. It understands what
+    people type into a search box - quoted "exact phrases", OR, and -minus
+    to exclude - and, crucially, it never raises on malformed input.
+    to_tsquery would: a stray & or | from a user is a syntax error and a
+    500.
+    """
+    return column.op("@@")(func.websearch_to_tsquery("english", query))
+
+
+def _rank(column, query: str):
+    """How well a row matches, for ordering.
+
+    ts_rank reads the weights set by the generated column, so a title match
+    outranks a body match rather than both counting the same.
+    """
+    return func.ts_rank(column, func.websearch_to_tsquery("english", query))
 
 
 class CourseRepository:
@@ -39,8 +65,100 @@ class CourseRepository:
         return await self._session.scalar(
             select(Course)
             .where(Course.id == course_id)
-            .options(selectinload(Course.modules).selectinload(Module.lessons))
+            .options(
+                selectinload(Course.modules).selectinload(Module.lessons),
+                selectinload(Course.prerequisites),
+            )
         )
+
+    async def prerequisite_ids(self, course_id: UUID) -> set[UUID]:
+        """The courses that must be finished before this one. FR-08.
+
+        Only the ids. The service compares them against what the student has
+        completed, and needs nothing else about them - loading whole Course
+        objects to look at their primary keys would be wasteful.
+
+        A set because the question asked of it is set subtraction: which of
+        these has the student not done.
+        """
+        rows = await self._session.scalars(
+            select(CoursePrerequisite.prerequisite_course_id).where(
+                CoursePrerequisite.course_id == course_id
+            )
+        )
+        return set(rows)
+
+    async def replace_prerequisites(
+        self, course_id: UUID, prerequisite_ids: list[UUID]
+    ) -> None:
+        """Set the complete list. FR-08.
+
+        Replace rather than append, for the same reason module_order sends
+        the whole order: "add one" needs a matching "remove one", and then
+        two endpoints can disagree about what the set currently is. Sending
+        the set makes the call idempotent - run it twice, same result.
+
+        Delete-then-insert rather than working out a diff. The set is a
+        handful of rows, the table carries no data of its own beyond the two
+        ids, and a diff would be more code to get subtly wrong for no gain.
+        """
+        await self._session.execute(
+            delete(CoursePrerequisite).where(
+                CoursePrerequisite.course_id == course_id
+            )
+        )
+        for prerequisite_id in dict.fromkeys(prerequisite_ids):
+            self._session.add(
+                CoursePrerequisite(
+                    course_id=course_id, prerequisite_course_id=prerequisite_id
+                )
+            )
+        await self._session.flush()
+
+    async def existing_ids(self, course_ids: set[UUID]) -> set[UUID]:
+        """Which of these courses actually exist.
+
+        One query rather than one per id, so naming twenty missing courses
+        costs the same as naming one.
+        """
+        if not course_ids:
+            return set()
+        rows = await self._session.scalars(
+            select(Course.id).where(Course.id.in_(course_ids))
+        )
+        return set(rows)
+
+    async def required_by(self, course_id: UUID) -> set[UUID]:
+        """Which courses list this one as a prerequisite.
+
+        The mirror of prerequisite_ids - same table, read from the other
+        side. It answers "who depends on me", which is the question the cycle
+        check needs: anything already depending on this course cannot also be
+        depended on by it.
+
+        One query regardless of how many prerequisites are being set. Asking
+        it the other way round - "does this candidate require me?", once per
+        candidate - is the same answer for N round trips.
+        """
+        rows = await self._session.scalars(
+            select(CoursePrerequisite.course_id).where(
+                CoursePrerequisite.prerequisite_course_id == course_id
+            )
+        )
+        return set(rows)
+
+    async def titles_for(self, course_ids: set[UUID]) -> dict[UUID, str]:
+        """Names for a set of ids, in one query.
+
+        Used to tell a student *which* prerequisites they are missing. A list
+        of UUIDs is not something anyone can act on.
+        """
+        if not course_ids:
+            return {}
+        rows = await self._session.execute(
+            select(Course.id, Course.title).where(Course.id.in_(course_ids))
+        )
+        return {row.id: row.title for row in rows}
 
     async def list(
         self,
@@ -49,6 +167,7 @@ class CourseRepository:
         instructor_id: UUID | None = None,
         visible_statuses: tuple[str, ...] | None = None,
         also_owned_by: UUID | None = None,
+        search: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[Course], int]:
@@ -72,6 +191,12 @@ class CourseRepository:
         if instructor_id is not None:
             filters.append(Course.instructor_id == instructor_id)
 
+        # FR-05's "search published courses". A filter like any other, so
+        # it combines with the visibility rules rather than bypassing them -
+        # searching cannot surface a draft that listing would hide.
+        if search:
+            filters.append(_matches(Course.search_vector, search))
+
         if visible_statuses is not None:
             # "courses in these states, or ones I own" - so an instructor sees
             # their own drafts without seeing anyone else's.
@@ -83,14 +208,23 @@ class CourseRepository:
         total = await self._session.scalar(
             select(func.count()).select_from(Course).where(*filters)
         )
+        # Newest first when browsing; best match first when searching.
+        # Sorting search results by date would bury the course somebody
+        # actually asked for under whatever was created most recently.
+        #
+        # Course.id still breaks ties in both cases. Without a total order
+        # paging is unreliable - Postgres may return equal rows in a
+        # different order between queries, so page 2 can repeat or skip
+        # rows from page 1 - and two courses can easily share a rank.
+        if search:
+            ordering = (_rank(Course.search_vector, search).desc(), Course.id)
+        else:
+            ordering = (Course.created_at.desc(), Course.id)
+
         rows = await self._session.scalars(
             select(Course)
             .where(*filters)
-            # A stable, total order. Without one, paging is unreliable:
-            # Postgres may return rows differently between queries, so page 2
-            # can repeat or skip rows from page 1. created_at alone is not
-            # enough - two courses can share a timestamp - so id breaks ties.
-            .order_by(Course.created_at.desc(), Course.id)
+            .order_by(*ordering)
             .limit(limit)
             .offset(offset)
         )
@@ -99,6 +233,19 @@ class CourseRepository:
     async def add(self, course: Course) -> Course:
         self._session.add(course)
         await self._session.flush()
+
+        # Reload it, and the reason is specific to enrolled_count.
+        #
+        # That attribute is a column_property - a subquery SQLAlchemy adds to
+        # every SELECT of a course. A course that has just been INSERTed was
+        # never SELECTed, so the attribute has no value, and touching it
+        # makes SQLAlchemy fetch it lazily. Under asyncio that is IO from a
+        # place that cannot do IO, and it fails with MissingGreenlet - an
+        # error that says nothing about courses or counts.
+        #
+        # One extra SELECT, on create only. Every other path loads the course
+        # with a query and already has it.
+        await self._session.refresh(course)
         return course
 
     async def delete(self, course: Course) -> None:
@@ -195,6 +342,65 @@ class LessonRepository:
 
     async def get_by_id(self, lesson_id: UUID) -> Lesson | None:
         return await self._session.get(Lesson, lesson_id)
+
+    async def ids_for_course(self, course_id: UUID) -> list[UUID]:
+        """Every lesson in a course, in reading order.
+
+        Joined through modules, because a lesson row knows only its module
+        and the module knows the course. Ordered by the module's position
+        and then the lesson's, so publishing walks a course the way a
+        student reads it - which makes a workflow history legible when
+        something fails half way through.
+
+        Only the ids. The caller loads each lesson when it gets to it, so a
+        200-lesson course is not held in memory to be processed one at a
+        time.
+        """
+        rows = await self._session.scalars(
+            select(Lesson.id)
+            .join(Module, Lesson.module_id == Module.id)
+            .where(Module.course_id == course_id)
+            .order_by(Module.position, Lesson.position)
+        )
+        return list(rows)
+
+    async def list_for_course(
+        self,
+        course_id: UUID,
+        *,
+        search: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[Lesson], int]:
+        """A course's lessons, optionally filtered by a search. FR-10c.
+
+        Scoped to one course rather than searching everything, because that
+        is the question a student actually has: they are reading a course
+        and want the lesson that covers something. A global search would
+        also have to filter by what each course's owner allows them to see,
+        on every row.
+
+        Reading order when browsing, best match first when searching.
+        """
+        joined = select(Lesson).join(Module, Lesson.module_id == Module.id)
+        filters = [Module.course_id == course_id]
+
+        if search:
+            filters.append(_matches(Lesson.search_vector, search))
+            ordering = (_rank(Lesson.search_vector, search).desc(), Lesson.id)
+        else:
+            ordering = (Module.position, Lesson.position)
+
+        total = await self._session.scalar(
+            select(func.count())
+            .select_from(Lesson)
+            .join(Module, Lesson.module_id == Module.id)
+            .where(*filters)
+        )
+        rows = await self._session.scalars(
+            joined.where(*filters).order_by(*ordering).limit(limit).offset(offset)
+        )
+        return list(rows), int(total or 0)
 
     async def list_for_module(self, module_id: UUID) -> list[Lesson]:
         rows = await self._session.scalars(

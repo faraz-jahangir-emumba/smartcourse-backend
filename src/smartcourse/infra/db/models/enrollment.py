@@ -18,7 +18,23 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from smartcourse.infra.db.base import Base, TimestampMixin, UUIDMixin
 
-ENROLLMENT_STATUSES = ("active", "completed", "withdrawn")
+# The three states an enrollment can be in, named once. Same reasoning as
+# the roles in user.py and the course statuses in course.py: a mistyped
+# status string is a comparison that is silently never true.
+ENROLLMENT_ACTIVE = "active"
+ENROLLMENT_COMPLETED = "completed"
+ENROLLMENT_WITHDRAWN = "withdrawn"
+
+ENROLLMENT_STATUSES = (
+    ENROLLMENT_ACTIVE,
+    ENROLLMENT_COMPLETED,
+    ENROLLMENT_WITHDRAWN,
+)
+
+# As a SQL literal, built from the tuple rather than retyped, so adding a
+# state cannot leave the CHECK constraint behind - which would accept it in
+# Python and reject it at the database.
+_ENROLLMENT_STATUSES_SQL = ", ".join(f"'{s}'" for s in ENROLLMENT_STATUSES)
 
 
 class Enrollment(UUIDMixin, TimestampMixin, Base):
@@ -40,7 +56,7 @@ class Enrollment(UUIDMixin, TimestampMixin, Base):
     )
 
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="active", index=True
+        String(20), nullable=False, server_default=ENROLLMENT_ACTIVE, index=True
     )
 
     enrolled_at: Mapped[datetime] = mapped_column(
@@ -55,7 +71,7 @@ class Enrollment(UUIDMixin, TimestampMixin, Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active', 'completed', 'withdrawn')",
+            f"status IN ({_ENROLLMENT_STATUSES_SQL})",
             name="ck_enrollments_status_valid",
         ),
         # A completed enrollment must say when, and an uncompleted one must not.
@@ -79,12 +95,15 @@ class Enrollment(UUIDMixin, TimestampMixin, Base):
             "student_id",
             "course_id",
             unique=True,
-            postgresql_where=text("status = 'active'"),
+            postgresql_where=text(f"status = '{ENROLLMENT_ACTIVE}'"),
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<Enrollment student={self.student_id} course={self.course_id} {self.status}>"
+        return (
+            f"<Enrollment student={self.student_id} "
+            f"course={self.course_id} {self.status}>"
+        )
 
 
 class LessonProgress(UUIDMixin, Base):
@@ -130,4 +149,7 @@ class LessonProgress(UUIDMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<LessonProgress enrollment={self.enrollment_id} lesson={self.lesson_id}>"
+        return (
+            f"<LessonProgress enrollment={self.enrollment_id} "
+            f"lesson={self.lesson_id}>"
+        )

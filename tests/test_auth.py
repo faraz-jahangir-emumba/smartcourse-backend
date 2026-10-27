@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.user import User
-
 from tests.conftest import PASSWORD, auth_header, register
 
 

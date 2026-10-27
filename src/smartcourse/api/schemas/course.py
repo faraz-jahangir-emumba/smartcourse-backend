@@ -31,6 +31,33 @@ class LessonResponse(BaseModel):
     title: str
     content: str | None
     position: int
+    # Why `content` is empty, when it is.
+    #
+    # Null content is ambiguous on its own - a lesson nobody has written
+    # yet looks exactly like one the caller may not read. A client showing
+    # "Enrol to read this" needs to tell those apart, and guessing from the
+    # absence of text is the kind of thing that works until an instructor
+    # saves an empty lesson.
+    content_locked: bool = False
+
+    @classmethod
+    def without_content(cls, lesson) -> "LessonResponse":
+        """The lesson as a syllabus entry: everything but the material.
+
+        Built field by field rather than by loading the model and clearing
+        the attribute. `lesson` is attached to the session, so assigning to
+        it would mark the row dirty and UPDATE the lesson to empty at the
+        end of the request - erasing content in order to hide it.
+        """
+        return cls(
+            id=lesson.id,
+            module_id=lesson.module_id,
+            title=lesson.title,
+            content=None,
+            position=lesson.position,
+            content_locked=True,
+        )
+
 
 
 class LessonDetailResponse(LessonResponse):
@@ -71,12 +98,96 @@ class ModuleDetailResponse(ModuleResponse):
     lessons: list[LessonResponse]
 
 
+class CourseSummary(BaseModel):
+    """A course named, not described. Used where one course refers to
+    another and the full object would be noise."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str
+
+
+class LessonListResponse(BaseModel):
+    """A page of lessons, same shape as every other list in this API."""
+
+    items: list[LessonResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class PublishAccepted(BaseModel):
+    """What POST /courses/{id}/publish returns.
+
+    Not the course. The workflow has been accepted, not finished, and the
+    status in the database is still whatever it was a moment ago - handing
+    back a course that says "draft" straight after a publish request reads
+    like the request was ignored.
+
+    So this says plainly what happened and where to look next.
+    """
+
+    course_id: UUID
+    # Exposed deliberately. It is the handle for this publish in Temporal's
+    # web UI, which is where anyone debugging a stuck publish needs to go.
+    workflow_id: str
+    # Where to look to find out how it went. It used to point at the course
+    # itself, which worked only while a failed publish showed up as a failed
+    # course - true for a first publish, false for a republish, which leaves
+    # the course `ready` either way. A field that looks like an answer and
+    # cannot give one is worse than no field, so it points somewhere that
+    # can.
+    status_url: str
+
+
+class PublishStatus(BaseModel):
+    """How a publish went. GET /courses/{id}/publish/status.
+
+    Two sources, deliberately, because neither is sufficient alone.
+
+    Temporal knows the outcome - it is the only thing that does, now that a
+    failed republish leaves the course untouched. But it is a workflow
+    engine, not an archive: histories age out of retention, after which a
+    long-finished publish is indistinguishable from one that never happened.
+
+    The course's own columns are durable but coarse: `ready` says a publish
+    succeeded at some point, not that the last one did.
+
+    So both are returned and the caller can tell the difference between
+    "the last publish failed" and "Temporal no longer remembers".
+    """
+
+    course_id: UUID
+    # From the database, and always true.
+    course_status: str
+    published_at: datetime | None
+    # From Temporal, and only as long as it keeps the history.
+    workflow_id: str
+    # running | completed | failed | timed_out | canceled | terminated
+    # | continued_as_new, or `unknown` when Temporal has no record - either
+    # never published, or published long enough ago to have aged out.
+    state: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    # How many chunks the publish wrote. Only knowable once it has finished,
+    # because it is the workflow's return value.
+    chunks_written: int | None = None
+
+
 class CourseCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str | None = None
     # Null means unlimited, which is a different thing from 0, which would
     # mean full. Two meanings need two values.
     capacity: int | None = Field(default=None, gt=0)
+    # Courses that must be finished first. FR-08.
+    #
+    # The complete list, every time - the same rule as module_order. "Add
+    # this one" would need a matching "remove this one", and then two
+    # endpoints can disagree about what the set currently is. Sending the
+    # whole set removes the question and makes the call idempotent.
+    prerequisite_ids: list[UUID] | None = None
 
 
 class CourseUpdate(BaseModel):
@@ -84,6 +195,10 @@ class CourseUpdate(BaseModel):
     description: str | None = None
     capacity: int | None = Field(default=None, gt=0)
     module_order: list[UUID] | None = None
+    # Replaces the set. An empty list clears it; omitting the field leaves it
+    # alone - which is the difference between "no prerequisites" and "I was
+    # not talking about prerequisites".
+    prerequisite_ids: list[UUID] | None = None
 
 
 class CourseResponse(BaseModel):
@@ -96,7 +211,25 @@ class CourseResponse(BaseModel):
     title: str
     description: str | None
     status: str
+    # The ceiling the instructor set. Null means unlimited, and it does not
+    # change as people join - enrolled_count is what moves.
     capacity: int | None
+    # How many are on it now. Together with capacity this is what a catalogue
+    # needs to say "1 place left" or "Full", rather than making somebody try
+    # to enrol and read the 409.
+    #
+    # Active only, which is what makes it directly comparable to capacity:
+    # a client disables its Enrol button on enrolled_count == capacity and
+    # needs no other call to decide.
+    #
+    # So completed students are not counted. Capacity means how many can
+    # study at once - a course with capacity 2 whose two students finish
+    # would otherwise be full for ever and could never be taught again.
+    #
+    # Which means this is not a popularity figure. A course five hundred
+    # people have completed reports 0, and "how many have ever taken this"
+    # is a different number that would need its own field.
+    enrolled_count: int = 0
     published_at: datetime | None
     created_at: datetime
 
@@ -110,6 +243,14 @@ class CourseDetailResponse(CourseResponse):
     """
 
     modules: list[ModuleDetailResponse]
+    # Titles, not bare ids. A student needs to know what a course requires
+    # before being refused by it, and ids alone would mean fetching each one
+    # just to render "requires Python Basics".
+    #
+    # On the detail view only. Putting it on CourseResponse would mean
+    # loading prerequisites for every course in a listing, which is a lot of
+    # work for something nobody reads until they open one.
+    prerequisites: list[CourseSummary] = []
 
 
 class CourseListResponse(BaseModel):

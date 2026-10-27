@@ -6,15 +6,17 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from smartcourse.infra.db.base import Base, TimestampMixin, UUIDMixin
@@ -25,7 +27,14 @@ if TYPE_CHECKING:
 # The course state machine, from UC-01:
 #   draft -> publishing -> ready
 #                       -> failed -> publishing
-COURSE_STATUSES = ("draft", "publishing", "ready", "failed")
+# The four states a course can be in, named once. Same reasoning as the
+# roles in user.py: a mistyped status string is a silently false comparison.
+STATUS_DRAFT = "draft"
+STATUS_PUBLISHING = "publishing"
+STATUS_READY = "ready"
+STATUS_FAILED = "failed"
+
+COURSE_STATUSES = (STATUS_DRAFT, STATUS_PUBLISHING, STATUS_READY, STATUS_FAILED)
 
 # As a SQL literal, built from the tuple above rather than retyped. Same
 # reasoning as VALID_ROLES in user.py: two hand-written copies of one list
@@ -53,7 +62,7 @@ class Course(UUIDMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
 
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="draft", index=True
+        String(20), nullable=False, server_default=STATUS_DRAFT, index=True
     )
 
     # Nullable on purpose. NULL means unlimited, which is a different thing
@@ -61,6 +70,29 @@ class Course(UUIDMixin, TimestampMixin, Base):
     capacity: Mapped[int | None] = mapped_column(Integer)
 
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # What FR-05's "search published courses" actually searches.
+    #
+    # A generated column: Postgres computes it on every insert and update,
+    # so no code path - a migration, a seed script, somebody fixing a title
+    # by hand in psql - can leave it stale. The alternative, maintaining it
+    # in application code or a trigger, is a thing that can be forgotten.
+    #
+    # setweight ranks a title match above a description match, so a course
+    # *called* "Python" beats one that mentions Python in passing.
+    #
+    # Server-side only. SQLAlchemy never writes it, and nothing reads it as
+    # an attribute - it exists to be queried with @@ and ranked with
+    # ts_rank, which the repository does.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(description, '')), 'B')",
+            persisted=True,
+        ),
+        nullable=False,
+    )
 
     instructor: Mapped["User"] = relationship(
         back_populates="courses", lazy="raise"
@@ -83,12 +115,30 @@ class Course(UUIDMixin, TimestampMixin, Base):
     # work out which one each relationship should follow - it refuses rather
     # than guessing. foreign_keys spells it out.
     #
-    # "what must I finish before taking this course?"
-    prerequisites: Mapped[list["CoursePrerequisite"]] = relationship(
+    # The link rows themselves - "what must I finish before taking this
+    # course?" Named _links because the thing most code actually wants is the
+    # courses, not the join rows, and that name should belong to the useful one.
+    prerequisite_links: Mapped[list["CoursePrerequisite"]] = relationship(
         back_populates="course",
         lazy="raise",
         foreign_keys="CoursePrerequisite.course_id",
         cascade="all, delete-orphan",
+    )
+
+    # The same thing, as courses, reading straight through the join table.
+    #
+    # viewonly because there are now two ways to see one set of rows, and
+    # letting both write them means two sources of truth about the same data.
+    # Writing goes through CourseRepository.replace_prerequisites; this is for
+    # reading, which is what an API response needs.
+    prerequisites: Mapped[list["Course"]] = relationship(
+        "Course",
+        secondary="course_prerequisites",
+        primaryjoin="Course.id == CoursePrerequisite.course_id",
+        secondaryjoin="Course.id == CoursePrerequisite.prerequisite_course_id",
+        viewonly=True,
+        lazy="raise",
+        order_by="Course.title",
     )
 
     # "which courses require this one?" - the reason this course cannot simply
@@ -105,7 +155,14 @@ class Course(UUIDMixin, TimestampMixin, Base):
             name="ck_courses_status_valid",
         ),
         # Zero capacity would mean a course nobody can ever join.
-        CheckConstraint("capacity IS NULL OR capacity > 0", name="ck_courses_capacity_positive"),
+        CheckConstraint(
+            "capacity IS NULL OR capacity > 0",
+            name="ck_courses_capacity_positive",
+        ),
+        # GIN, not btree. A tsvector holds many words per row and the
+        # question asked of it is "which rows contain this word" - which is
+        # what an inverted index answers and a btree cannot.
+        Index("ix_courses_search", "search_vector", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:
@@ -151,7 +208,7 @@ class CoursePrerequisite(Base):
     )
 
     course: Mapped["Course"] = relationship(
-        back_populates="prerequisites",
+        back_populates="prerequisite_links",
         lazy="raise",
         foreign_keys=[course_id],
     )
@@ -175,7 +232,10 @@ class CoursePrerequisite(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<CoursePrerequisite {self.course_id} needs {self.prerequisite_course_id}>"
+        return (
+            f"<CoursePrerequisite {self.course_id} "
+            f"needs {self.prerequisite_course_id}>"
+        )
 
 
 class Module(UUIDMixin, TimestampMixin, Base):
@@ -251,6 +311,17 @@ class Lesson(UUIDMixin, TimestampMixin, Base):
     # into chunks, and the assistant searches those chunks in UC-05.
     content: Mapped[str | None] = mapped_column(Text)
 
+    # FR-10c. Same reasoning as the one on courses, over title and content.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(title, '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(content, '')), 'B')",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+
     position: Mapped[int] = mapped_column(Integer)
 
     module: Mapped["Module"] = relationship(back_populates="lessons", lazy="raise")
@@ -264,6 +335,7 @@ class Lesson(UUIDMixin, TimestampMixin, Base):
             initially="DEFERRED",
         ),
         CheckConstraint("position >= 0", name="ck_lessons_position_non_negative"),
+        Index("ix_lessons_search", "search_vector", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:

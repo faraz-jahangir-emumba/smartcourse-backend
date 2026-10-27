@@ -15,7 +15,11 @@ from smartcourse.domain.errors import (
     ConflictError,
     ValidationError,
 )
-from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.models.user import (
+    ROLE_INSTRUCTOR,
+    ROLE_STUDENT,
+    User,
+)
 from smartcourse.infra.db.repositories import UserRepository
 from smartcourse.infra.security import (
     hash_password,
@@ -30,7 +34,7 @@ from smartcourse.infra.security import (
 # their own role would let anyone become an admin by editing one field of the
 # request - the kind of hole that looks obvious written down and is very easy
 # to leave open. Admin is granted by an existing admin, never claimed.
-SELF_ASSIGNABLE_ROLES = ("student", "instructor")
+SELF_ASSIGNABLE_ROLES = (ROLE_STUDENT, ROLE_INSTRUCTOR)
 
 
 def _assert_self_assignable(roles: list[str]) -> None:

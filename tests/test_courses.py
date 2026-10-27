@@ -1,16 +1,17 @@
 """Course, module and lesson management. FR-03, FR-04, FR-05."""
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
-
 from tests.conftest import auth_header, register
 
 
-async def _make_course(client: AsyncClient, headers: dict, title: str = "Python") -> str:
+async def _make_course(
+    client: AsyncClient, headers: dict, title: str = "Python"
+) -> str:
     response = await client.post(
         "/courses", json={"title": title, "description": "x"}, headers=headers
     )
@@ -548,9 +549,16 @@ async def test_student_cannot_read_a_lesson_of_a_draft_course(
     assert response.status_code == 404
 
 
-async def test_student_can_read_a_lesson_once_published(
+async def test_an_enrolled_student_can_read_a_lesson(
     client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
 ) -> None:
+    """Published is not enough on its own any more.
+
+    This test used to assert that any student could read a published
+    lesson, which was true and was the thing that made enrolment a
+    formality. Reading now needs an active enrolment - see may_read_content
+    in services/course.py.
+    """
     course_id = await _make_course(client, instructor)
     module_id = (
         await client.post(
@@ -566,10 +574,14 @@ async def test_student_can_read_a_lesson_once_published(
     ).json()["id"]
     await _publish(session, course_id)
 
-    response = await client.get(f"/lessons/{lesson_id}", headers=student)
+    before = await client.get(f"/lessons/{lesson_id}", headers=student)
+    assert before.status_code == 403
 
-    assert response.status_code == 200
-    assert response.json()["content"] == "hello"
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    after = await client.get(f"/lessons/{lesson_id}", headers=student)
+    assert after.status_code == 200
+    assert after.json()["content"] == "hello"
 
 
 async def test_dropping_the_instructor_role_hides_your_own_drafts(
@@ -620,3 +632,219 @@ async def test_the_course_returns_when_the_role_does(
     back = await auth_header(client, "instructor@example.com")
 
     assert (await client.get(f"/courses/{course_id}", headers=back)).status_code == 200
+
+
+# --- prerequisites, FR-08 --------------------------------------------------
+
+
+async def test_prerequisites_can_be_set_on_create(
+    client: AsyncClient, instructor: dict
+) -> None:
+    basics = await _make_course(client, instructor, title="Python Basics")
+
+    response = await client.post(
+        "/courses",
+        json={"title": "Advanced", "prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+    assert response.status_code == 201
+
+    detail = await client.get(f"/courses/{response.json()['id']}", headers=instructor)
+    assert detail.json()["prerequisites"] == [
+        {"id": basics, "title": "Python Basics"}
+    ]
+
+
+async def test_updating_replaces_the_whole_set(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The complete list, every time - the same rule as module_order."""
+    first = await _make_course(client, instructor, title="First")
+    second = await _make_course(client, instructor, title="Second")
+    advanced = await _make_course(client, instructor, title="Advanced")
+
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [first]},
+        headers=instructor,
+    )
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [second]},
+        headers=instructor,
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    titles = [p["title"] for p in detail.json()["prerequisites"]]
+    assert titles == ["Second"]
+
+
+async def test_an_empty_list_clears_prerequisites(
+    client: AsyncClient, instructor: dict
+) -> None:
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+
+    await client.patch(
+        f"/courses/{advanced}", json={"prerequisite_ids": []}, headers=instructor
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    assert detail.json()["prerequisites"] == []
+
+
+async def test_omitting_the_field_leaves_prerequisites_alone(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The difference between "no prerequisites" and "I was not talking about
+    prerequisites"."""
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+
+    await client.patch(
+        f"/courses/{advanced}", json={"title": "Renamed"}, headers=instructor
+    )
+
+    detail = await client.get(f"/courses/{advanced}", headers=instructor)
+    assert len(detail.json()["prerequisites"]) == 1
+
+
+async def test_an_unknown_prerequisite_is_rejected(
+    client: AsyncClient, instructor: dict
+) -> None:
+    advanced = await _make_course(client, instructor, title="Advanced")
+    ghost = str(uuid4())
+
+    response = await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [ghost]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["unknown"] == [ghost]
+
+
+async def test_a_course_cannot_require_itself(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The database has a CHECK for this. The service checks too, so the
+    instructor gets a sentence rather than a constraint violation."""
+    advanced = await _make_course(client, instructor, title="Advanced")
+
+    response = await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [advanced]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert "its own prerequisite" in response.json()["error"]["message"]
+
+
+async def test_two_courses_cannot_require_each_other(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """A loop makes both courses permanently unenrollable, and does it
+    silently - nothing errors, students just can never get in."""
+    first = await _make_course(client, instructor, title="First")
+    second = await _make_course(client, instructor, title="Second")
+    await client.patch(
+        f"/courses/{second}",
+        json={"prerequisite_ids": [first]},
+        headers=instructor,
+    )
+
+    response = await client.patch(
+        f"/courses/{first}",
+        json={"prerequisite_ids": [second]},
+        headers=instructor,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["conflicts_with"] == ["Second"]
+
+
+async def test_prerequisites_set_through_the_api_block_enrollment(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """The whole loop, end to end: an instructor sets a prerequisite through
+    the API and a student is refused by it.
+
+    Until this existed, FR-08 was enforced against rows nothing could create.
+    """
+    basics = await _make_course(client, instructor, title="Python Basics")
+    advanced = await _make_course(client, instructor, title="Advanced")
+    await client.patch(
+        f"/courses/{advanced}",
+        json={"prerequisite_ids": [basics]},
+        headers=instructor,
+    )
+    await _publish(session, basics)
+    await _publish(session, advanced)
+
+    response = await client.post(
+        f"/courses/{advanced}/enrollments/enroll", headers=student
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["details"]["missing"] == ["Python Basics"]
+
+
+# --- editing a published course, FR-04 -------------------------------------
+
+
+async def test_a_published_course_can_still_be_edited(
+    client: AsyncClient, instructor: dict, session: AsyncSession
+) -> None:
+    """Until Module 2 this was refused, and there was no way back from
+    ready - so a published course could never be corrected again, not even a
+    typo. Nothing in the brief asked for that.
+
+    The course stays ready. Students read lessons.content directly, so they
+    see the fix at once; what goes stale is the chunk index behind the
+    assistant, and republishing refreshes it cheaply.
+    """
+    course_id = await _make_course(client, instructor, title="Published")
+    await _publish(session, course_id)
+
+    response = await client.patch(
+        f"/courses/{course_id}", json={"title": "Corrected"}, headers=instructor
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Corrected"
+    assert response.json()["status"] == "ready"
+
+
+async def test_a_course_being_published_cannot_be_edited(
+    client: AsyncClient, instructor: dict, session: AsyncSession
+) -> None:
+    """The one status that is still closed.
+
+    The workflow is reading the content while it runs. An edit underneath it
+    would leave some chunks built from the old text and some from the new,
+    with no way to tell which.
+    """
+    course_id = await _make_course(client, instructor, title="Mid-publish")
+    course = await session.get(Course, UUID(course_id))
+    course.status = "publishing"
+    await session.flush()
+
+    response = await client.patch(
+        f"/courses/{course_id}", json={"title": "Sneaky"}, headers=instructor
+    )
+
+    assert response.status_code == 409
+    assert "publishing" in response.json()["error"]["message"]
+    assert "ready" in response.json()["error"]["details"]["editable_in"]

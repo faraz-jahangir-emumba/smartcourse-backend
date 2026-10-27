@@ -14,9 +14,19 @@ if TYPE_CHECKING:
     # SQLAlchemy, so the real import is not needed.
     from smartcourse.infra.db.models.course import Course
 
-# The three roles, in one place. Used by the CHECK constraint below and by
-# permission checks later, so there is no second list to fall out of step.
-VALID_ROLES = ("student", "instructor", "admin")
+# The three roles, named once.
+#
+# Spelled out as constants rather than written as strings wherever they are
+# needed. A mistyped "admln" in a permission check is not an error - it is a
+# condition that is simply never true, so the check silently admits nobody
+# and nothing fails loudly. ROLE_ADMLN does not import.
+ROLE_STUDENT = "student"
+ROLE_INSTRUCTOR = "instructor"
+ROLE_ADMIN = "admin"
+
+# The CHECK constraint below and every permission check read from this, so
+# there is no second list to fall out of step.
+VALID_ROLES = (ROLE_STUDENT, ROLE_INSTRUCTOR, ROLE_ADMIN)
 
 # The same list again, as the SQL literal the CHECK constraint needs. Built
 # from the tuple rather than retyped, so adding a role cannot leave the
