@@ -171,7 +171,25 @@ class CourseResponse(BaseModel):
     title: str
     description: str | None
     status: str
+    # The ceiling the instructor set. Null means unlimited, and it does not
+    # change as people join - enrolled_count is what moves.
     capacity: int | None
+    # How many are on it now. Together with capacity this is what a catalogue
+    # needs to say "1 place left" or "Full", rather than making somebody try
+    # to enrol and read the 409.
+    #
+    # Active only, which is what makes it directly comparable to capacity:
+    # a client disables its Enrol button on enrolled_count == capacity and
+    # needs no other call to decide.
+    #
+    # So completed students are not counted. Capacity means how many can
+    # study at once - a course with capacity 2 whose two students finish
+    # would otherwise be full for ever and could never be taught again.
+    #
+    # Which means this is not a popularity figure. A course five hundred
+    # people have completed reports 0, and "how many have ever taken this"
+    # is a different number that would need its own field.
+    enrolled_count: int = 0
     published_at: datetime | None
     created_at: datetime
 

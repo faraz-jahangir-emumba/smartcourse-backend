@@ -498,3 +498,147 @@ async def test_two_students_cannot_take_the_last_seat(engine) -> None:
             for uid in [*user_ids, teacher.id]:
                 await cleanup.delete(await cleanup.get(User, uid))
             await cleanup.commit()
+
+
+# --- how full is it, FR-07 -------------------------------------------------
+
+
+async def test_a_course_reports_how_many_are_enrolled(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """`capacity` is the ceiling the instructor set and never moves;
+    `enrolled_count` is what changes.
+
+    Without the count there is no way to tell a course with two free places
+    from a full one, short of trying to enrol and reading the 409 - which
+    is a poor way for a catalogue to show "1 place left".
+    """
+    course_id = await _ready_course(client, session, instructor, capacity=2)
+
+    before = await client.get(f"/courses/{course_id}", headers=student)
+    assert before.json()["capacity"] == 2
+    assert before.json()["enrolled_count"] == 0
+
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    after = await client.get(f"/courses/{course_id}", headers=student)
+    assert after.json()["capacity"] == 2, "the ceiling does not move"
+    assert after.json()["enrolled_count"] == 1
+
+
+async def test_withdrawing_frees_the_count_too(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """Only active enrolments are counted - the same rule the capacity check
+    uses, so the number a catalogue shows and the number that refuses a
+    student cannot disagree."""
+    course_id = await _ready_course(client, session, instructor, capacity=2)
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+    await client.post(f"/courses/{course_id}/enrollments/withdraw", headers=student)
+
+    body = (await client.get(f"/courses/{course_id}", headers=student)).json()
+
+    assert body["enrolled_count"] == 0
+
+
+async def test_the_listing_reports_it_too(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """A correlated subquery, so twenty courses is still one round trip
+    rather than twenty counts."""
+    course_id = await _ready_course(client, session, instructor, capacity=5)
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    listing = (await client.get("/courses", headers=student)).json()
+
+    found = next(c for c in listing["items"] if c["id"] == course_id)
+    assert found["enrolled_count"] == 1
+
+
+async def test_a_freshly_created_course_reports_zero(
+    client: AsyncClient, instructor: dict
+) -> None:
+    """The case that broke first.
+
+    enrolled_count is a column_property - a subquery added to every SELECT.
+    A course that was just INSERTed was never SELECTed, so the attribute has
+    no value, and reading it makes SQLAlchemy fetch it lazily. Under asyncio
+    that is IO where IO cannot happen, and it fails with MissingGreenlet -
+    an error mentioning neither courses nor counts.
+
+    CourseRepository.add refreshes after the insert for exactly this.
+    """
+    response = await client.post(
+        "/courses", json={"title": "Brand new"}, headers=instructor
+    )
+
+    assert response.status_code == 201
+    assert response.json()["enrolled_count"] == 0
+
+
+async def test_completing_frees_a_seat_and_lowers_the_count(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """Capacity is how many can study at once, not how many places exist
+    for all time.
+
+    A course with capacity 2 whose two students finish would otherwise be
+    permanently full and could never be taught again - the course is a
+    reusable asset, not a one-off cohort.
+
+    Set directly because nothing can complete an enrollment yet: that is
+    FR-14/15, which the Guidelines put in Week 3. The test exists now
+    precisely because it is unreachable - whoever writes the completion
+    code in Module 3 will not stop to ask what completing should do to
+    capacity, and this says so.
+    """
+    course_id = await _ready_course(client, session, instructor, capacity=1)
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    full = (await client.get(f"/courses/{course_id}", headers=student)).json()
+    assert full["enrolled_count"] == 1
+
+    await register(client, "second@example.com", ["student"])
+    other = await auth_header(client, "second@example.com")
+    assert (
+        await client.post(
+            f"/courses/{course_id}/enrollments/enroll", headers=other
+        )
+    ).status_code == 409
+
+    enrollment = await session.scalar(
+        select(Enrollment).where(Enrollment.course_id == UUID(course_id))
+    )
+    enrollment.status = "completed"
+    enrollment.completed_at = enrollment.enrolled_at
+    await session.flush()
+
+    after = (await client.get(f"/courses/{course_id}", headers=other)).json()
+    assert after["enrolled_count"] == 0, "a finished student is not taking a seat"
+
+    assert (
+        await client.post(
+            f"/courses/{course_id}/enrollments/enroll", headers=other
+        )
+    ).status_code == 201
+
+
+async def test_the_count_is_what_a_client_compares_against_capacity(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """The whole reason it is active-only.
+
+    A client decides whether to disable its Enrol button with
+    `enrolled_count === capacity` and nothing else. If completed students
+    were counted, that comparison would say "full" about a course with free
+    places, and the button would be wrong rather than merely stale.
+    """
+    course_id = await _ready_course(client, session, instructor, capacity=1)
+
+    body = (await client.get(f"/courses/{course_id}", headers=student)).json()
+    assert body["enrolled_count"] < body["capacity"], "a client would enable it"
+
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    body = (await client.get(f"/courses/{course_id}", headers=student)).json()
+    assert body["enrolled_count"] == body["capacity"], "a client would disable it"

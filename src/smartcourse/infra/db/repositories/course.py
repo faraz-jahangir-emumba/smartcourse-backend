@@ -233,6 +233,19 @@ class CourseRepository:
     async def add(self, course: Course) -> Course:
         self._session.add(course)
         await self._session.flush()
+
+        # Reload it, and the reason is specific to enrolled_count.
+        #
+        # That attribute is a column_property - a subquery SQLAlchemy adds to
+        # every SELECT of a course. A course that has just been INSERTed was
+        # never SELECTed, so the attribute has no value, and touching it
+        # makes SQLAlchemy fetch it lazily. Under asyncio that is IO from a
+        # place that cannot do IO, and it fails with MissingGreenlet - an
+        # error that says nothing about courses or counts.
+        #
+        # One extra SELECT, on create only. Every other path loads the course
+        # with a query and already has it.
+        await self._session.refresh(course)
         return course
 
     async def delete(self, course: Course) -> None:

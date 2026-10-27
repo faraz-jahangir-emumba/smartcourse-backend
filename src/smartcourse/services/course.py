@@ -337,11 +337,12 @@ async def get_course_detail(
 async def get_module_detail(
     courses: CourseRepository,
     modules: ModuleRepository,
+    enrollments: EnrollmentRepository,
     *,
     module_id: UUID,
     user: User,
-) -> Module:
-    """One module with its lessons.
+) -> tuple[Module, bool]:
+    """One module with its lessons, and whether they may be read.
 
     Visibility is decided by the parent course, never by the module itself.
     Without walking up, this endpoint would be a way round the course rule:
@@ -356,7 +357,13 @@ async def get_module_detail(
     if not can_view(course, user):
         raise NotFoundError("No module with that id.")
 
-    return module
+    # Walking up decides two things, not one. Visibility above, and whether
+    # the material may be read - this endpoint returns lessons, so leaving
+    # the second out made it a way round the enrolment gate, one module at
+    # a time. Found by hand after the other three paths were done, which is
+    # the point: "apply the rule on every path out" is easy to write and
+    # easy to miss one of.
+    return module, await may_read_content(course, user, enrollments)
 
 
 async def get_lesson_detail(

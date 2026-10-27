@@ -219,3 +219,46 @@ async def test_search_results_do_not_carry_locked_content(
     assert items[0]["title"] == "Lesson One"
     assert items[0]["content"] is None
     assert items[0]["content_locked"] is True
+
+
+async def test_a_module_does_not_leak_its_lessons_either(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    """The path that was missed.
+
+    GET /modules/{id} returns a module with its lessons, and it already
+    walked up to the course to decide *visibility* - a student could not
+    read a draft course's modules. But it did not ask the second question,
+    so a published course was readable one module at a time while the
+    course endpoint looked perfectly correct.
+
+    Found by hand after the other three were done, which is the lesson:
+    "apply the rule on every path out" is easy to write and easy to miss
+    one of. The audit that followed checked all twelve endpoints; the two
+    others returning lesson content are instructor-only writes.
+    """
+    course_id, _ = await _published_course(client, instructor, session)
+    module_id = (
+        await client.get(f"/courses/{course_id}", headers=instructor)
+    ).json()["modules"][0]["id"]
+
+    body = (await client.get(f"/modules/{module_id}", headers=student)).json()
+
+    lesson = body["lessons"][0]
+    assert lesson["title"] == "Lesson One"
+    assert lesson["content"] is None
+    assert lesson["content_locked"] is True
+
+
+async def test_enrolling_unlocks_the_module_view_too(
+    client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
+) -> None:
+    course_id, _ = await _published_course(client, instructor, session)
+    module_id = (
+        await client.get(f"/courses/{course_id}", headers=instructor)
+    ).json()["modules"][0]["id"]
+
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    body = (await client.get(f"/modules/{module_id}", headers=student)).json()
+    assert body["lessons"][0]["content"] == CONTENT

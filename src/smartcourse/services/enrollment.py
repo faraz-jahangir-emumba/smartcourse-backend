@@ -15,7 +15,11 @@ from smartcourse.domain.errors import (
     PermissionDeniedError,
 )
 from smartcourse.infra.db.models.course import STATUS_READY, Course
-from smartcourse.infra.db.models.enrollment import Enrollment
+from smartcourse.infra.db.models.enrollment import (
+    ENROLLMENT_ACTIVE,
+    ENROLLMENT_WITHDRAWN,
+    Enrollment,
+)
 from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_STUDENT, User
 from smartcourse.infra.db.repositories import CourseRepository, EnrollmentRepository
 
@@ -65,7 +69,7 @@ async def enroll(
 
     await _assert_seat_available(enrollments, course_id=course_id, course=course)
 
-    enrollment = Enrollment(student_id=user.id, course_id=course_id, status="active")
+    enrollment = Enrollment(student_id=user.id, course_id=course_id, status=ENROLLMENT_ACTIVE)
     enrollments.add(enrollment)
 
     # Flush so a constraint violation surfaces here rather than at commit.
@@ -103,7 +107,7 @@ async def withdraw(
     if enrollment is None:
         raise NotFoundError("You are not enrolled in this course.")
 
-    enrollment.status = "withdrawn"
+    enrollment.status = ENROLLMENT_WITHDRAWN
     return enrollment
 
 

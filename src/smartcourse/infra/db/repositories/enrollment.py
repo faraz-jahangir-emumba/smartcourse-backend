@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
-from smartcourse.infra.db.models.enrollment import Enrollment
+from smartcourse.infra.db.models.enrollment import ENROLLMENT_ACTIVE, Enrollment
 
 
 class EnrollmentRepository:
@@ -45,14 +45,28 @@ class EnrollmentRepository:
         )
 
     async def count_active(self, course_id: UUID) -> int:
-        """How many people are currently enrolled. Withdrawn and completed
-        enrollments are history and do not occupy a seat."""
+        """How many people are currently enrolled.
+
+        Active only. Withdrawn is obvious - somebody who left is not taking
+        up a place.
+
+        Completed is the interesting one, and it is deliberate. Capacity
+        means how many people can be studying at once, not how many places
+        exist for all time: a course with capacity 2 whose two students
+        finish would otherwise be permanently full and could never be
+        taught again. The course is a reusable asset, not a one-off cohort.
+
+        The consequence to be aware of: this is not a popularity figure. A
+        course five hundred people have completed reports 0. "How many have
+        ever taken this" is a different question and would need a different
+        count.
+        """
         return await self._session.scalar(
             select(func.count())
             .select_from(Enrollment)
             .where(
                 Enrollment.course_id == course_id,
-                Enrollment.status == "active",
+                Enrollment.status == ENROLLMENT_ACTIVE,
             )
         )
 
@@ -68,7 +82,7 @@ class EnrollmentRepository:
             select(Enrollment).where(
                 Enrollment.student_id == student_id,
                 Enrollment.course_id == course_id,
-                Enrollment.status == "active",
+                Enrollment.status == ENROLLMENT_ACTIVE,
             )
         )
 

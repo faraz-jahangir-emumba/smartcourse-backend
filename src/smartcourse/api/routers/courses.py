@@ -336,12 +336,28 @@ async def list_lessons(
     summary="One module, with its lessons",
 )
 async def get_module(
-    module_id: UUID, courses: CourseRepo, modules: ModuleRepo, user: CurrentUser
+    module_id: UUID,
+    courses: CourseRepo,
+    modules: ModuleRepo,
+    enrollments: EnrollmentRepo,
+    user: CurrentUser,
 ) -> ModuleDetailResponse:
-    module = await course_service.get_module_detail(
-        courses, modules, module_id=module_id, user=user
+    """One module and its lessons, with the same gate as everywhere else.
+
+    This endpoint returns lesson content, so it needs the enrolment check
+    exactly as GET /courses/{id} does - without it a non-enrolled student
+    reads a whole course one module at a time.
+    """
+    module, may_read = await course_service.get_module_detail(
+        courses, modules, enrollments, module_id=module_id, user=user
     )
-    return ModuleDetailResponse.model_validate(module)
+
+    detail = ModuleDetailResponse.model_validate(module)
+    if not may_read:
+        detail.lessons = [
+            LessonResponse.without_content(lesson) for lesson in detail.lessons
+        ]
+    return detail
 
 
 @router.patch(
