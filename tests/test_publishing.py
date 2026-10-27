@@ -4,7 +4,7 @@ The service layer only - no Temporal here. These call the same functions the
 activities will, which is the point of keeping the logic out of the workflow.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -305,7 +305,7 @@ async def test_going_live_records_when(session: AsyncSession) -> None:
     lesson = await _lesson(session)
     course = await _course_of(session, lesson)
     assert course.published_at is None
-    at = datetime(2026, 10, 27, 9, 0, tzinfo=timezone.utc)
+    at = datetime(2026, 10, 27, 9, 0, tzinfo=UTC)
 
     await complete_publish(
         CourseRepository(session), course_id=course.id, finished_at=at
@@ -327,7 +327,7 @@ async def test_the_publication_date_is_not_rewritten_by_a_republish(
     """
     lesson = await _lesson(session)
     course = await _course_of(session, lesson)
-    first = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+    first = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
     courses = CourseRepository(session)
 
     await complete_publish(courses, course_id=course.id, finished_at=first)

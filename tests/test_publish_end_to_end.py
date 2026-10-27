@@ -70,7 +70,7 @@ async def temporal_client():
     workflow being broken."""
     try:
         return await Client.connect(TEMPORAL_ADDRESS)
-    except Exception as exc:  # noqa: BLE001 - any connection problem counts
+    except Exception as exc:
         if os.environ.get("CI"):
             raise
         pytest.skip(f"no Temporal at {TEMPORAL_ADDRESS}: {exc}")

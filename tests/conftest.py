@@ -33,21 +33,20 @@ from pathlib import Path
 # development database.
 os.environ["POSTGRES_DB"] = "smartcourse_test"
 
-import pytest  # noqa: E402
-from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy.ext.asyncio import (  # noqa: E402
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool  # noqa: E402
+from sqlalchemy.pool import NullPool
+from temporalio.service import RPCError, RPCStatusCode
 
-from temporalio.service import RPCError, RPCStatusCode  # noqa: E402
-
-from smartcourse.config import get_settings  # noqa: E402
-from smartcourse.infra.db.session import get_session  # noqa: E402
-from smartcourse.infra.temporal import get_temporal_client  # noqa: E402
-from smartcourse.main import create_app  # noqa: E402
+from smartcourse.config import get_settings
+from smartcourse.infra.db.session import get_session
+from smartcourse.infra.temporal import get_temporal_client
+from smartcourse.main import create_app
 
 PASSWORD = "correct-horse-battery"
 

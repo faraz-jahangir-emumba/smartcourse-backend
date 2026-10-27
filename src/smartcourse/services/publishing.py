@@ -13,9 +13,20 @@ import hashlib
 from datetime import datetime
 from uuid import UUID
 
-from smartcourse.domain.errors import ConflictError, NotFoundError, PermissionDeniedError
+from smartcourse.domain.errors import (
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
+)
 from smartcourse.infra.db.models.content import Chunk
-from smartcourse.infra.db.models.course import Course, Lesson
+from smartcourse.infra.db.models.course import (
+    STATUS_DRAFT,
+    STATUS_FAILED,
+    STATUS_PUBLISHING,
+    STATUS_READY,
+    Course,
+    Lesson,
+)
 from smartcourse.infra.db.models.user import (
     ROLE_ADMIN,
     ROLE_INSTRUCTOR,
@@ -24,12 +35,6 @@ from smartcourse.infra.db.models.user import (
 from smartcourse.infra.db.repositories import ChunkRepository, CourseRepository
 from smartcourse.services.chunking import chunk_text, estimate_tokens
 from smartcourse.services.course import can_view
-from smartcourse.infra.db.models.course import (
-    STATUS_DRAFT,
-    STATUS_FAILED,
-    STATUS_PUBLISHING,
-    STATUS_READY,
-)
 
 # Only these can be published. The one excluded is `publishing`, so a second
 # publish cannot start while one is running - though Temporal's workflow id

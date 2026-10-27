@@ -24,11 +24,10 @@ import asyncio
 import sys
 
 from smartcourse.config import get_settings
-from smartcourse.infra.db.models.user import User
+from smartcourse.infra.db.models.user import ROLE_ADMIN, User
 from smartcourse.infra.db.repositories import UserRepository
 from smartcourse.infra.db.session import SessionFactory, dispose_engine
 from smartcourse.infra.security import hash_password
-from smartcourse.infra.db.models.user import ROLE_ADMIN
 
 # The same floor registration applies. An admin password should not be weaker
 # than a student's.

@@ -17,7 +17,7 @@ first one died. A session handed in from outside would belong to a process
 that may no longer exist.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from temporalio import activity
@@ -136,7 +136,7 @@ async def mark_ready(course_id: str) -> None:
         await publishing.complete_publish(
             CourseRepository(session),
             course_id=UUID(course_id),
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
         )
         await session.commit()
 

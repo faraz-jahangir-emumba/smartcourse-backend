@@ -1,0 +1,39 @@
+# Line endings, decided here rather than per machine.
+#
+# Windows ends a line with CRLF, Linux and macOS with LF. Without this file
+# the answer comes from each developer's own `core.autocrlf`, which is a
+# setting nobody remembers they have - and the two failures it causes are
+# both hard to recognise:
+#
+#   phantom diffs   one tool writes LF, another rewrites CRLF, and git
+#                   reports every line of the file as changed. A one-word
+#                   edit arrives as a 500-line diff and the reviewer cannot
+#                   find the actual change
+#
+#   broken scripts  CI runs on Linux. A shell script stored with CRLF has
+#                   `#!/bin/bash\r` as its first line, so Linux looks for an
+#                   interpreter literally called `bash\r` and reports `bad
+#                   interpreter` - which says nothing about line endings
+#
+# Committed to the repository, so it applies to everyone who clones it and
+# overrides whatever their local git is configured to do.
+
+# Normalise every text file to LF in the repository, and check it out as LF.
+# `text=auto` lets git decide what is text; `eol=lf` fixes what it does with
+# it. Every editor worth using on Windows reads LF.
+* text=auto eol=lf
+
+# Everything tracked today is text. These are here for the binaries that
+# arrive with uploads in Module 3: marked binary so git never rewrites a
+# byte of them, and never tries to show a diff.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.docx binary
+*.xlsx binary
+*.pptx binary

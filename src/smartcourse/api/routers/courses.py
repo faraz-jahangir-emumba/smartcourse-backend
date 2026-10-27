@@ -19,18 +19,15 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from smartcourse.api.deps import (
-    EnrollmentRepo,
-    WorkflowClient,
     CourseRepo,
     CurrentUser,
+    EnrollmentRepo,
     LessonRepo,
     ModuleRepo,
+    WorkflowClient,
     require_roles,
 )
 from smartcourse.api.schemas.course import (
-    LessonListResponse,
-    PublishAccepted,
-    PublishStatus,
     CourseCreate,
     CourseDetailResponse,
     CourseListResponse,
@@ -38,14 +35,18 @@ from smartcourse.api.schemas.course import (
     CourseUpdate,
     LessonCreate,
     LessonDetailResponse,
+    LessonListResponse,
     LessonResponse,
     LessonUpdate,
     ModuleCreate,
     ModuleDetailResponse,
     ModuleResponse,
     ModuleUpdate,
+    PublishAccepted,
+    PublishStatus,
 )
 from smartcourse.domain.errors import ConflictError
+from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_INSTRUCTOR
 from smartcourse.services import course as course_service
 from smartcourse.services import publishing as publishing_service
 from smartcourse.workflows.publishing import (
@@ -53,7 +54,6 @@ from smartcourse.workflows.publishing import (
     PublishCourseWorkflow,
     workflow_id_for,
 )
-from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_INSTRUCTOR
 
 router = APIRouter(tags=["courses"])
 

@@ -10,7 +10,7 @@ So these open real sessions, commit for real, and clean up by hand.
 """
 
 import asyncio
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,10 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from smartcourse.domain.errors import ConflictError
 from smartcourse.infra.db.models.course import Course, Module
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.db.repositories import CourseRepository, ModuleRepository
+from smartcourse.infra.db.repositories import (
+    CourseRepository,
+    ModuleRepository,
+    UserRepository,
+)
 from smartcourse.services import auth as auth_service
 from smartcourse.services import course as course_service
-from smartcourse.infra.db.repositories import UserRepository
 
 
 async def test_two_modules_added_at_once_get_different_positions(engine) -> None:

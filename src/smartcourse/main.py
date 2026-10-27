@@ -16,6 +16,7 @@ from smartcourse.api.errors import register_exception_handlers
 from smartcourse.api.routers import auth, courses, enrollment, users
 from smartcourse.infra.db.session import dispose_engine
 
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown.

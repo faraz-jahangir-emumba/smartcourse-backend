@@ -12,7 +12,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
-
 from tests.conftest import auth_header, register
 
 
@@ -184,7 +183,7 @@ async def test_lessons_list_in_reading_order_without_a_query(
     response = await client.get(f"/courses/{course_id}/lessons", headers=instructor)
 
     assert response.status_code == 200
-    assert [l["title"] for l in response.json()["items"]] == ["First", "Second"]
+    assert [item["title"] for item in response.json()["items"]] == ["First", "Second"]
 
 
 async def test_it_finds_a_lesson_by_its_content(
@@ -200,7 +199,7 @@ async def test_it_finds_a_lesson_by_its_content(
         f"/courses/{course_id}/lessons?q=recursion", headers=instructor
     )
 
-    assert [l["id"] for l in response.json()["items"]] == [wanted]
+    assert [item["id"] for item in response.json()["items"]] == [wanted]
 
 
 async def test_a_student_cannot_search_lessons_in_a_draft(
@@ -233,4 +232,4 @@ async def test_a_student_can_search_lessons_in_a_published_course(
     )
 
     assert response.status_code == 200
-    assert [l["id"] for l in response.json()["items"]] == [wanted]
+    assert [item["id"] for item in response.json()["items"]] == [wanted]

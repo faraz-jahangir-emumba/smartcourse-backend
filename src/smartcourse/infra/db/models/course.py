@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     CheckConstraint,
     Computed,
-    Index,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -155,7 +155,10 @@ class Course(UUIDMixin, TimestampMixin, Base):
             name="ck_courses_status_valid",
         ),
         # Zero capacity would mean a course nobody can ever join.
-        CheckConstraint("capacity IS NULL OR capacity > 0", name="ck_courses_capacity_positive"),
+        CheckConstraint(
+            "capacity IS NULL OR capacity > 0",
+            name="ck_courses_capacity_positive",
+        ),
         # GIN, not btree. A tsvector holds many words per row and the
         # question asked of it is "which rows contain this word" - which is
         # what an inverted index answers and a btree cannot.
@@ -229,7 +232,10 @@ class CoursePrerequisite(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<CoursePrerequisite {self.course_id} needs {self.prerequisite_course_id}>"
+        return (
+            f"<CoursePrerequisite {self.course_id} "
+            f"needs {self.prerequisite_course_id}>"
+        )
 
 
 class Module(UUIDMixin, TimestampMixin, Base):

@@ -100,7 +100,10 @@ class Enrollment(UUIDMixin, TimestampMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Enrollment student={self.student_id} course={self.course_id} {self.status}>"
+        return (
+            f"<Enrollment student={self.student_id} "
+            f"course={self.course_id} {self.status}>"
+        )
 
 
 class LessonProgress(UUIDMixin, Base):
@@ -146,4 +149,7 @@ class LessonProgress(UUIDMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<LessonProgress enrollment={self.enrollment_id} lesson={self.lesson_id}>"
+        return (
+            f"<LessonProgress enrollment={self.enrollment_id} "
+            f"lesson={self.lesson_id}>"
+        )

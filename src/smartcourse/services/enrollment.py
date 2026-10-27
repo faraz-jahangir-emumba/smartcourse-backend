@@ -69,7 +69,9 @@ async def enroll(
 
     await _assert_seat_available(enrollments, course_id=course_id, course=course)
 
-    enrollment = Enrollment(student_id=user.id, course_id=course_id, status=ENROLLMENT_ACTIVE)
+    enrollment = Enrollment(
+        student_id=user.id, course_id=course_id, status=ENROLLMENT_ACTIVE
+    )
     enrollments.add(enrollment)
 
     # Flush so a constraint violation surfaces here rather than at commit.

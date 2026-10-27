@@ -37,7 +37,7 @@ async def temporal_client():
     """
     try:
         return await Client.connect(TEMPORAL_ADDRESS)
-    except Exception as exc:  # noqa: BLE001 - any connection problem counts
+    except Exception as exc:
         if os.environ.get("CI"):
             # Not in CI. There Temporal is started by the workflow, so an
             # unreachable server is a broken pipeline - and a skipped test

@@ -161,4 +161,7 @@ class Chunk(UUIDMixin, Base):
     )
 
     def __repr__(self) -> str:
-        return f"<Chunk lesson={self.lesson_id} pos={self.position} tokens={self.token_count}>"
+        return (
+            f"<Chunk lesson={self.lesson_id} pos={self.position} "
+            f"tokens={self.token_count}>"
+        )

@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
 from smartcourse.infra.db.models.user import User
-
 from tests.conftest import auth_header, register
 
 CONTENT = "The material nobody should read without enrolling."

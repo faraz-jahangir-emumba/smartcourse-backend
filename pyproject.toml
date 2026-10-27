@@ -37,9 +37,51 @@ pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
 
+[tool.ruff]
+# Alembic writes these, not us. They are a record of what was already run
+# against a database, so rewriting one to satisfy a style rule changes
+# history for no benefit - and the few findings in them are all from
+# Alembic's own template.
+exclude = ["src/smartcourse/infra/db/migrations"]
+
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# Beyond the default E and F, each of these was added because it catches
+# something this project can actually get wrong:
+#
+#   I       import order, so a merge does not reorder them for you
+#   UP      Python 3.12 is the floor; no reason to write 3.8
+#   B       bugbear - mutable default arguments, loop-variable closures
+#   SIM     needless complexity that reads as if it means something
+#   C4      comprehensions written as calls to list() and dict()
+#   ASYNC   blocking calls inside async functions. The whole stack is
+#           async, and one sync call inside an endpoint stalls every other
+#           request on the loop - the single most expensive mistake
+#           available here, and invisible in a passing test
+#   LOG     logging mistakes, including calls on the root logger
+#   BLE     blind `except Exception`, where it swallows rather than re-raises
+#   RUF     ruff's own, which includes RUF100 below
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "ASYNC", "LOG", "BLE", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# LESSON is three paragraphs of prose, one per line, and the chunker is
+# measured against it word for word. Wrapping it would put newlines inside
+# the text under test - which the sentence splitter would probably survive,
+# and "probably" is not a word to use about the fixture a token-counting
+# test depends on.
+"tests/test_chunking.py" = ["E501"]
+
+# RUF100 flags a `# noqa` that suppresses nothing. Worth saying out loud:
+# it found fourteen on the first run - comments written against rules that
+# were never enabled, suppressing warnings nobody was issuing. A dead
+# suppression is worse than none, because the next reader believes it.
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.3",
 ]

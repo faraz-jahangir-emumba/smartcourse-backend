@@ -6,11 +6,12 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
-
 from tests.conftest import auth_header, register
 
 
-async def _make_course(client: AsyncClient, headers: dict, title: str = "Python") -> str:
+async def _make_course(
+    client: AsyncClient, headers: dict, title: str = "Python"
+) -> str:
     response = await client.post(
         "/courses", json={"title": title, "description": "x"}, headers=headers
     )

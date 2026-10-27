@@ -15,7 +15,7 @@ endpoint's decisions rather than whether a workflow then ran -
 tests/test_publish_workflow.py covers that against a real server.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -25,7 +25,6 @@ from temporalio.client import WorkflowExecutionStatus
 
 from smartcourse.infra.db.models.course import Course
 from smartcourse.infra.db.models.user import User
-
 from tests.conftest import auth_header, register
 
 
@@ -304,8 +303,8 @@ async def test_a_finished_publish_reports_its_chunk_count(
     course_id = await _course(client, instructor)
     client.workflows.description = SimpleNamespace(
         status=WorkflowExecutionStatus.COMPLETED,
-        start_time=datetime(2026, 10, 27, 9, 0, tzinfo=timezone.utc),
-        close_time=datetime(2026, 10, 27, 9, 0, 12, tzinfo=timezone.utc),
+        start_time=datetime(2026, 10, 27, 9, 0, tzinfo=UTC),
+        close_time=datetime(2026, 10, 27, 9, 0, 12, tzinfo=UTC),
     )
     client.workflows.result = 14
 
@@ -332,8 +331,8 @@ async def test_a_failed_republish_is_visible_here_and_nowhere_else(
     await _set_status(session, course_id, "ready")
     client.workflows.description = SimpleNamespace(
         status=WorkflowExecutionStatus.FAILED,
-        start_time=datetime(2026, 10, 27, 9, 0, tzinfo=timezone.utc),
-        close_time=datetime(2026, 10, 27, 9, 0, 3, tzinfo=timezone.utc),
+        start_time=datetime(2026, 10, 27, 9, 0, tzinfo=UTC),
+        close_time=datetime(2026, 10, 27, 9, 0, 3, tzinfo=UTC),
     )
 
     body = (

@@ -24,6 +24,12 @@ from smartcourse.infra.db.session import dispose_engine
 from smartcourse.workflows.activities import ALL_ACTIVITIES
 from smartcourse.workflows.publishing import TASK_QUEUE, PublishCourseWorkflow
 
+# Named after this module rather than the root logger. logging.info() goes to
+# the root, which means every library's handler configuration applies to it
+# and nothing downstream can raise or silence *this* process's logging on its
+# own. A named logger is the only one that can be configured separately.
+logger = logging.getLogger(__name__)
+
 logging.basicConfig(level=logging.INFO)
 
 # Where the server lives. Not in Settings yet because nothing else needs it;
@@ -41,7 +47,7 @@ async def main() -> None:
         activities=ALL_ACTIVITIES,
     )
 
-    logging.info("worker listening on %s", TASK_QUEUE)
+    logger.info("worker listening on %s", TASK_QUEUE)
     try:
         await worker.run()
     finally:

@@ -84,6 +84,13 @@ jobs:
         # rather than working on one machine and not another.
         run: uv sync --frozen
 
+      # Before the tests, and before Temporal is started: it needs no
+      # services, takes under a second, and a run that is going to fail on
+      # a dead import should say so in ten seconds rather than three
+      # minutes.
+      - name: Lint
+        run: uv run ruff check .
+
       # Temporal, for the publishing workflow tests.
       #
       # Started as a step rather than declared under `services:`, because a

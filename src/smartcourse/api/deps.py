@@ -27,8 +27,8 @@ from smartcourse.infra.db.repositories import (
     UserRepository,
 )
 from smartcourse.infra.db.session import get_session
-from smartcourse.infra.temporal import get_temporal_client
 from smartcourse.infra.security import TokenError, decode_access_token
+from smartcourse.infra.temporal import get_temporal_client
 
 # scope="function" is load-bearing, not decoration.
 #
@@ -156,7 +156,7 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_roles(*allowed: str):  # noqa: ANN201 - returns a FastAPI dependency
+def require_roles(*allowed: str):
     """Build a dependency that admits only these roles. FR-03.
 
     Used as:

@@ -19,7 +19,6 @@ from smartcourse.infra.db.models.enrollment import Enrollment
 from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import CourseRepository, EnrollmentRepository
 from smartcourse.services import enrollment as enrollment_service
-
 from tests.conftest import auth_header, register
 
 
