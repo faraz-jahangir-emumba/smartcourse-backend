@@ -90,8 +90,10 @@ with no request and no status code to return.
 | *Is this **your** course?* | `services` — a rule that must hold for callers with no route |
 | *How do I fetch that?* | `repositories` — the only place queries are built |
 
-Design decisions, including the options rejected, are in
-**[docs/SCHEMA.md](docs/SCHEMA.md)** and **[docs/API.md](docs/API.md)**.
+How data and events actually move through this, and what each decision
+cost, is in **[docs/DESIGN.md](docs/DESIGN.md)**. Schema and endpoint
+reasoning are in **[docs/SCHEMA.md](docs/SCHEMA.md)** and
+**[docs/API.md](docs/API.md)**.
 
 ---
 
@@ -303,7 +305,8 @@ unlimited course takes no lock at all.
 ### Publishing
 
 ```
-POST /courses/{id}/publish     →  202 Accepted, immediately
+POST /courses/{id}/publish            →  202 Accepted, immediately
+GET  /courses/{id}/publish/status     →  how the last one went
 ```
 
 Publishing is not a status change. Part A §2 describes a multi-step
@@ -312,8 +315,10 @@ half-published — so it runs as a **Temporal workflow**, which is why the
 worker exists.
 
 ```
-draft  ──▶  publishing  ──▶  ready
-                        └─▶  failed
+first publish   draft  ──▶  publishing  ──▶  ready
+                                        └─▶  failed
+
+republish       ready  ──▶  ready       ──▶  ready
 ```
 
 The request returns in milliseconds, before any work is done:
@@ -322,11 +327,11 @@ The request returns in milliseconds, before any work is done:
 {
   "course_id": "e11a8634-…",
   "workflow_id": "publish-course-e11a8634-…",
-  "status_url": "/api/v1/courses/e11a8634-…"
+  "status_url": "/api/v1/courses/e11a8634-…/publish/status"
 }
 ```
 
-Poll `status_url` and watch `status` change. `workflow_id` is the handle for
+Poll `status_url` to find out how it went. `workflow_id` is the handle for
 this publish in Temporal's UI at **<http://localhost:8233>**, which is where
 to look when one is stuck.
 
@@ -337,6 +342,35 @@ never leaving it on `publishing`, which is the one state nobody can diagnose
 by looking at it, because it means either "still working" or "the worker
 died an hour ago".
 
+**A republish never moves the status.** A course that is already `ready` has
+students enrolled and reading it, and `ready` is the only status they can
+see — so moving it would pull a live course out of the catalogue while a
+background job rebuilt data no reader touches. Lesson text comes from the
+lesson row; chunks feed search and the assistant from Module 4 onward. A
+republish that *fails* leaves the course `ready` too, still serving last
+time's chunks, because `failed` is terminal and would hide a working course
+indefinitely.
+
+Which is why the status endpoint exists: the course can no longer tell you
+whether the last publish worked, and Temporal can.
+
+```json
+{
+  "course_status": "ready",
+  "published_at": "2026-10-27T09:00:00Z",
+  "state": "failed",
+  "chunks_written": null
+}
+```
+
+Both halves on purpose. Temporal is a workflow engine, not an archive —
+histories age out of retention, and `state: "unknown"` then means *either*
+never published *or* published long ago. The durable columns beside it tell
+those apart.
+
+Nobody is *notified* of a failed republish yet; they have to ask. Pushing it
+to the instructor needs the events work in Module 3.
+
 **You cannot publish the same course twice at once.** The workflow id is
 `publish-course-{id}`, and Temporal refuses a second workflow with an id
 already running. Not "unlikely to" — the second request gets a 409.
@@ -345,6 +379,11 @@ already running. Not "unlikely to" — the second request gets a 409.
 republish only rewrites what actually changed. Editing one lesson does not
 re-process the other 199 — which matters in Module 4, where every chunk
 carries an embedding that costs time and money to produce.
+
+To see it: publish, edit one lesson, publish again, and compare the chunk
+rows. The untouched lessons keep their row ids; only the edited lesson's
+chunk is new. `tests/test_publish_end_to_end.py` asserts exactly that
+against a real worker and a real database.
 
 ### Search
 
@@ -478,7 +517,7 @@ src/smartcourse/
 ├─ worker.py            runs workflow code; its own process
 └─ main.py              the application factory
 
-docs/                   PRD · schema · API design
+docs/                   design · PRD · schema · API
 tests/                  pytest suite
 ```
 
@@ -548,6 +587,8 @@ Everything above, with the reasoning and the options rejected, is in
 
 ## Documentation
 
+- **[docs/DESIGN.md](docs/DESIGN.md)** — the technical design: module
+  breakdown, data and event flow, the decisions and what they cost
 - **[docs/PRD.md](docs/PRD.md)** — problem, use cases, numbered requirements,
   traceability, and the assumptions filling gaps the brief leaves open
 - **[docs/SCHEMA.md](docs/SCHEMA.md)** — every table and column with the
