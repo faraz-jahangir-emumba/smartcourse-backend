@@ -548,9 +548,16 @@ async def test_student_cannot_read_a_lesson_of_a_draft_course(
     assert response.status_code == 404
 
 
-async def test_student_can_read_a_lesson_once_published(
+async def test_an_enrolled_student_can_read_a_lesson(
     client: AsyncClient, instructor: dict, student: dict, session: AsyncSession
 ) -> None:
+    """Published is not enough on its own any more.
+
+    This test used to assert that any student could read a published
+    lesson, which was true and was the thing that made enrolment a
+    formality. Reading now needs an active enrolment - see may_read_content
+    in services/course.py.
+    """
     course_id = await _make_course(client, instructor)
     module_id = (
         await client.post(
@@ -566,10 +573,14 @@ async def test_student_can_read_a_lesson_once_published(
     ).json()["id"]
     await _publish(session, course_id)
 
-    response = await client.get(f"/lessons/{lesson_id}", headers=student)
+    before = await client.get(f"/lessons/{lesson_id}", headers=student)
+    assert before.status_code == 403
 
-    assert response.status_code == 200
-    assert response.json()["content"] == "hello"
+    await client.post(f"/courses/{course_id}/enrollments/enroll", headers=student)
+
+    after = await client.get(f"/lessons/{lesson_id}", headers=student)
+    assert after.status_code == 200
+    assert after.json()["content"] == "hello"
 
 
 async def test_dropping_the_instructor_role_hides_your_own_drafts(

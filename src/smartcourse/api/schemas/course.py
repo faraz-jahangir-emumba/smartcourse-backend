@@ -31,6 +31,33 @@ class LessonResponse(BaseModel):
     title: str
     content: str | None
     position: int
+    # Why `content` is empty, when it is.
+    #
+    # Null content is ambiguous on its own - a lesson nobody has written
+    # yet looks exactly like one the caller may not read. A client showing
+    # "Enrol to read this" needs to tell those apart, and guessing from the
+    # absence of text is the kind of thing that works until an instructor
+    # saves an empty lesson.
+    content_locked: bool = False
+
+    @classmethod
+    def without_content(cls, lesson) -> "LessonResponse":
+        """The lesson as a syllabus entry: everything but the material.
+
+        Built field by field rather than by loading the model and clearing
+        the attribute. `lesson` is attached to the session, so assigning to
+        it would mark the row dirty and UPDATE the lesson to empty at the
+        end of the request - erasing content in order to hide it.
+        """
+        return cls(
+            id=lesson.id,
+            module_id=lesson.module_id,
+            title=lesson.title,
+            content=None,
+            position=lesson.position,
+            content_locked=True,
+        )
+
 
 
 class LessonDetailResponse(LessonResponse):

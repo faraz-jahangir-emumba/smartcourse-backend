@@ -37,6 +37,7 @@ from smartcourse.infra.db.models.user import (
 )
 from smartcourse.infra.db.repositories import (
     CourseRepository,
+    EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
 )
@@ -107,6 +108,38 @@ def can_view(course: Course, user: User) -> bool:
     if ROLE_ADMIN in user.roles:
         return True
     return course.instructor_id == user.id and ROLE_INSTRUCTOR in user.roles
+
+
+async def may_read_content(
+    course: Course, user: User, enrollments: EnrollmentRepository
+) -> bool:
+    """Whether this caller may read the lesson material, not just the shape.
+
+    Seeing a course and reading it are two different permissions, and until
+    Module 2 they were the same one: any signed-in user got the full text of
+    every published course, which made enrolment a formality.
+
+    The split is what a catalogue needs. You cannot decide whether to enrol
+    without seeing the syllabus - module and lesson titles - and you should
+    not get the material without enrolling. Part A §1 reads in that order:
+    "students browse courses, enroll, ... and interact with content".
+
+    Three ways through:
+
+        the owning instructor   it is their course
+        an admin                consistent with seeing and editing anything
+        an active enrollment    FR-06's one-per-course row
+
+    A withdrawn enrollment does not count. Leaving a course and keeping the
+    material would make withdrawing free.
+    """
+    if ROLE_ADMIN in user.roles:
+        return True
+    if course.instructor_id == user.id:
+        return True
+
+    active = await enrollments.get_active(student_id=user.id, course_id=course.id)
+    return active is not None
 
 
 def _assert_editable(course: Course) -> None:
@@ -274,8 +307,12 @@ async def list_courses(
 
 
 async def get_course_detail(
-    courses: CourseRepository, *, course_id: UUID, user: User
-) -> Course:
+    courses: CourseRepository,
+    enrollments: EnrollmentRepository,
+    *,
+    course_id: UUID,
+    user: User,
+) -> tuple[Course, bool]:
     """One course with its modules and lessons.
 
     The same visibility rule as the listing, and it has to be here too -
@@ -292,7 +329,9 @@ async def get_course_detail(
     if not can_view(course, user):
         raise NotFoundError("No course with that id.")
 
-    return course
+    # The course and whether its material may be read. Two different
+    # permissions: seeing the syllabus is how somebody decides to enrol.
+    return course, await may_read_content(course, user, enrollments)
 
 
 async def get_module_detail(
@@ -324,6 +363,7 @@ async def get_lesson_detail(
     courses: CourseRepository,
     modules: ModuleRepository,
     lessons: LessonRepository,
+    enrollments: EnrollmentRepository,
     *,
     lesson_id: UUID,
     user: User,
@@ -341,6 +381,17 @@ async def get_lesson_detail(
 
     if not can_view(course, user):
         raise NotFoundError("No lesson with that id.")
+
+    # 403 here, where the listing instead returns the lesson without its
+    # text. The difference is what the caller asked for: a listing is the
+    # syllabus and is meant to be browsed, while fetching one lesson is
+    # asking for the material itself. Handing back a title and nothing else
+    # would be an odd way to say no.
+    if not await may_read_content(course, user, enrollments):
+        raise PermissionDeniedError(
+            "Enrol in this course to read its lessons.",
+            details={"course_id": str(course.id)},
+        )
 
     return lesson, course.id
 
@@ -435,13 +486,14 @@ async def _set_prerequisites(
 async def list_lessons(
     courses: CourseRepository,
     lessons: LessonRepository,
+    enrollments: EnrollmentRepository,
     *,
     course_id: UUID,
     user: User,
     search: str | None = None,
     limit: int = 20,
     offset: int = 0,
-) -> tuple[list[Lesson], int]:
+) -> tuple[list[Lesson], int, bool]:
     """A course's lessons, optionally searched. FR-10c.
 
     The visibility check runs on the *course*, once, before any lesson is
@@ -456,9 +508,10 @@ async def list_lessons(
     if not can_view(course, user):
         raise NotFoundError("No course with that id.")
 
-    return await lessons.list_for_course(
+    items, total = await lessons.list_for_course(
         course_id, search=search, limit=limit, offset=offset
     )
+    return items, total, await may_read_content(course, user, enrollments)
 
 
 async def delete_course(

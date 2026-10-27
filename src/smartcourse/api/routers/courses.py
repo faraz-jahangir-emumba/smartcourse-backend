@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Query, status
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from smartcourse.api.deps import (
+    EnrollmentRepo,
     WorkflowClient,
     CourseRepo,
     CurrentUser,
@@ -121,12 +122,29 @@ async def list_courses(
     summary="One course, with its modules and lessons",
 )
 async def get_course(
-    course_id: UUID, courses: CourseRepo, user: CurrentUser
+    course_id: UUID,
+    courses: CourseRepo,
+    enrollments: EnrollmentRepo,
+    user: CurrentUser,
 ) -> CourseDetailResponse:
-    course = await course_service.get_course_detail(
-        courses, course_id=course_id, user=user
+    """The whole course. Lesson text only for those who may read it.
+
+    A caller who is not enrolled still gets the structure - every module
+    and lesson, with titles and order - because that is the syllabus, and
+    it is how somebody decides whether to enrol. Each locked lesson comes
+    back with `content: null` and `content_locked: true`.
+    """
+    course, may_read = await course_service.get_course_detail(
+        courses, enrollments, course_id=course_id, user=user
     )
-    return CourseDetailResponse.model_validate(course)
+
+    detail = CourseDetailResponse.model_validate(course)
+    if not may_read:
+        for module in detail.modules:
+            module.lessons = [
+                LessonResponse.without_content(lesson) for lesson in module.lessons
+            ]
+    return detail
 
 
 @router.patch(
@@ -267,6 +285,7 @@ async def list_lessons(
     course_id: UUID,
     courses: CourseRepo,
     lessons: LessonRepo,
+    enrollments: EnrollmentRepo,
     user: CurrentUser,
     q: str | None = Query(
         default=None,
@@ -288,9 +307,10 @@ async def list_lessons(
     are reading something and want the lesson that covers a topic. A global
     search would have to apply every course's visibility rules row by row.
     """
-    items, total = await course_service.list_lessons(
+    items, total, may_read = await course_service.list_lessons(
         courses,
         lessons,
+        enrollments,
         course_id=course_id,
         user=user,
         search=q,
@@ -298,7 +318,12 @@ async def list_lessons(
         offset=offset,
     )
     return LessonListResponse(
-        items=[LessonResponse.model_validate(lesson) for lesson in items],
+        items=[
+            LessonResponse.model_validate(lesson)
+            if may_read
+            else LessonResponse.without_content(lesson)
+            for lesson in items
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -399,13 +424,14 @@ async def get_lesson(
     courses: CourseRepo,
     modules: ModuleRepo,
     lessons: LessonRepo,
+    enrollments: EnrollmentRepo,
     user: CurrentUser,
 ) -> LessonDetailResponse:
     """Built field by field rather than with model_validate, because
     course_id is not a column on a lesson - the service supplies it from the
     visibility check it had to do anyway."""
     lesson, course_id = await course_service.get_lesson_detail(
-        courses, modules, lessons, lesson_id=lesson_id, user=user
+        courses, modules, lessons, enrollments, lesson_id=lesson_id, user=user
     )
     return LessonDetailResponse(
         id=lesson.id,
