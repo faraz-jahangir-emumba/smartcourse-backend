@@ -30,3 +30,6 @@ htmlcov/
 # OS
 Thumbs.db
 .DS_Store
+
+# uv leaves these behind when two commands run at once.
+uv-*.lock

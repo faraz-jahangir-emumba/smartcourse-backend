@@ -42,6 +42,8 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+from temporalio.service import RPCError, RPCStatusCode  # noqa: E402
+
 from smartcourse.config import get_settings  # noqa: E402
 from smartcourse.infra.db.session import get_session  # noqa: E402
 from smartcourse.infra.temporal import get_temporal_client  # noqa: E402
@@ -57,6 +59,30 @@ class _StartedWorkflow:
         self.id = workflow_id
 
 
+class _StubWorkflowHandle:
+    """A handle to a workflow the stub never ran.
+
+    describe() raises NOT_FOUND, which is exactly what Temporal does for a
+    workflow id it has never seen - and the state the publish-status
+    endpoint has to cope with anyway, since histories age out of retention.
+    A test that wants a finished workflow sets `description` on the stub
+    client.
+    """
+
+    def __init__(self, workflow_id: str, description=None, result=None) -> None:
+        self.id = workflow_id
+        self._description = description
+        self._result = result
+
+    async def describe(self):
+        if self._description is None:
+            raise RPCError("not found", RPCStatusCode.NOT_FOUND, b"")
+        return self._description
+
+    async def result(self):
+        return self._result
+
+
 class _StubWorkflowClient:
     """Records what was started instead of starting it.
 
@@ -66,10 +92,17 @@ class _StubWorkflowClient:
 
     def __init__(self) -> None:
         self.started: list[tuple] = []
+        # Set by a test that needs describe() to answer. Left None, every
+        # handle reports NOT_FOUND.
+        self.description = None
+        self.result = None
 
     async def start_workflow(self, run, *args, id: str, task_queue: str, **kw):
         self.started.append((id, task_queue, args))
         return _StartedWorkflow(id)
+
+    def get_workflow_handle(self, workflow_id: str, **kw):
+        return _StubWorkflowHandle(workflow_id, self.description, self.result)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_DB = "smartcourse_test"
@@ -205,10 +238,14 @@ async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
     #
     # The real client is exercised by tests/test_publish_workflow.py, which
     # needs a real server and says so.
-    app.dependency_overrides[get_temporal_client] = lambda: _StubWorkflowClient()
+    workflow_client = _StubWorkflowClient()
+    app.dependency_overrides[get_temporal_client] = lambda: workflow_client
+    # Hung on the test client so a test can make describe() answer.
+    c_workflows = workflow_client
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test/api/v1") as c:
+        c.workflows = c_workflows
         yield c
 
     app.dependency_overrides.clear()

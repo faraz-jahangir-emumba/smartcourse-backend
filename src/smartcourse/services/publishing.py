@@ -10,6 +10,7 @@ also means publishing can be tested without a worker running.
 """
 
 import hashlib
+from datetime import datetime
 from uuid import UUID
 
 from smartcourse.domain.errors import ConflictError, NotFoundError, PermissionDeniedError
@@ -23,12 +24,24 @@ from smartcourse.infra.db.models.user import (
 from smartcourse.infra.db.repositories import ChunkRepository, CourseRepository
 from smartcourse.services.chunking import chunk_text, estimate_tokens
 from smartcourse.services.course import can_view
-from smartcourse.infra.db.models.course import STATUS_DRAFT, STATUS_FAILED
+from smartcourse.infra.db.models.course import (
+    STATUS_DRAFT,
+    STATUS_FAILED,
+    STATUS_PUBLISHING,
+    STATUS_READY,
+)
 
-# Only these can be published. `publishing` is excluded so a second publish
-# cannot start while one is running - though Temporal's workflow id is what
-# actually enforces that; this is the readable error.
-PUBLISHABLE_STATUSES = (STATUS_DRAFT, STATUS_FAILED)
+# Only these can be published. The one excluded is `publishing`, so a second
+# publish cannot start while one is running - though Temporal's workflow id
+# is what actually enforces that; this is the readable error.
+#
+# `ready` is in the list because republishing is the point. Part A says it
+# twice: "when an instructor publishes *or updates* a course", and the
+# problem it opens with is that publishing is slow "and update existing
+# ones". Incremental chunking (FR-11a) only has a purpose if a second
+# publish can happen at all - the first version of this tuple left `ready`
+# out by accident, which built the expensive half and gated off the door.
+PUBLISHABLE_STATUSES = (STATUS_DRAFT, STATUS_FAILED, STATUS_READY)
 
 
 def content_hash(text: str) -> str:
@@ -46,14 +59,15 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-async def assert_can_publish(
+async def assert_publishing_access(
     courses: CourseRepository, *, course_id: UUID, user: User
 ) -> Course:
-    """The checks the endpoint runs before starting a workflow.
+    """May this caller manage this course's publishing at all?
 
-    Deliberately separate from the workflow itself. A permission check
-    belongs in the request that made it, where there is a caller to refuse -
-    not in a background job that has already been accepted.
+    Split out from assert_can_publish because two endpoints need the same
+    404/403 ladder and only one of them cares what status the course is in:
+    asking how a publish went is reasonable at any moment, including while
+    one is running, which is exactly when the status check would refuse.
     """
     course = await courses.get_by_id(course_id)
     if course is None:
@@ -83,6 +97,20 @@ async def assert_can_publish(
                 "This course belongs to another instructor."
             )
 
+    return course
+
+
+async def assert_can_publish(
+    courses: CourseRepository, *, course_id: UUID, user: User
+) -> Course:
+    """The checks the endpoint runs before starting a workflow.
+
+    Deliberately separate from the workflow itself. A permission check
+    belongs in the request that made it, where there is a caller to refuse -
+    not in a background job that has already been accepted.
+    """
+    course = await assert_publishing_access(courses, course_id=course_id, user=user)
+
     if course.status not in PUBLISHABLE_STATUSES:
         raise ConflictError(
             f"A course in '{course.status}' cannot be published.",
@@ -108,6 +136,63 @@ async def set_status(
     if course is None:
         raise NotFoundError("No course with that id.")
     course.status = status
+
+
+async def begin_publish(courses: CourseRepository, *, course_id: UUID) -> bool:
+    """Start a publish. Returns whether this is the course's first one.
+
+    The one decision that shapes everything after it, so it is made once,
+    here, and carried rather than re-derived.
+
+    A first publish and a republish are the same work on different objects.
+    The first runs on a course nobody can see, so moving it to `publishing`
+    costs nothing and FR-12 wants the visible progress. A republish runs on
+    a course students are enrolled in and reading - and `can_view` only lets
+    `ready` through, so moving the status would take a live course out of
+    the catalogue for the length of a background job.
+
+    Nothing readable changes during a republish anyway. Lesson text is
+    served from lessons.content; chunks are derived data that nothing
+    outside this module reads until the embeddings arrive in Module 4. So
+    the honest status for a course being republished is the one it already
+    has, and this leaves it alone.
+
+    Read from `status` rather than `published_at` deliberately. Both would
+    work today, but status is what can_view actually consults, so branching
+    on it cannot drift from the behaviour it is protecting - and a course
+    published before published_at was ever written still gets the right
+    answer.
+    """
+    course = await courses.get_by_id(course_id)
+    if course is None:
+        raise NotFoundError("No course with that id.")
+
+    is_first = course.status != STATUS_READY
+    if is_first:
+        course.status = STATUS_PUBLISHING
+    return is_first
+
+
+async def complete_publish(
+    courses: CourseRepository, *, course_id: UUID, finished_at: datetime
+) -> None:
+    """A first publish succeeded: the course goes live.
+
+    Only ever called for a first publish - a republish has nothing to
+    change, because the course was already `ready` and stayed that way.
+
+    published_at is written here and nowhere else. The column has existed
+    since Module 1 and was never set, so every course has reported null for
+    it; this is the moment it means something. Set once, so it keeps meaning
+    "when this course went live" - "when it last changed" is already
+    answered by updated_at from TimestampMixin.
+    """
+    course = await courses.get_by_id(course_id)
+    if course is None:
+        raise NotFoundError("No course with that id.")
+
+    course.status = STATUS_READY
+    course.published_at = finished_at
 
 
 async def chunk_lesson(

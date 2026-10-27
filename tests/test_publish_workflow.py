@@ -55,18 +55,28 @@ class Recorder:
     whichever function the worker registered under it.
     """
 
-    def __init__(self, *, lessons: int = 3, fail_on: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        lessons: int = 3,
+        fail_on: int | None = None,
+        is_first: bool = True,
+    ) -> None:
         self.calls: list[str] = []
         self.lessons = lessons
         self.fail_on = fail_on
         self.chunk_attempts = 0
+        # What begin_publish reports back. True is a first publish, False a
+        # republish of a course that is already live.
+        self.is_first = is_first
 
     def activities(self) -> list:
         recorder = self
 
-        @activity.defn(name="mark_publishing")
-        async def mark_publishing(course_id: str) -> None:
-            recorder.calls.append("mark_publishing")
+        @activity.defn(name="begin_publish")
+        async def begin_publish(course_id: str) -> bool:
+            recorder.calls.append("begin_publish")
+            return recorder.is_first
 
         @activity.defn(name="list_lesson_ids")
         async def list_lesson_ids(course_id: str) -> list[str]:
@@ -93,7 +103,7 @@ class Recorder:
             recorder.calls.append("mark_failed")
 
         return [
-            mark_publishing,
+            begin_publish,
             list_lesson_ids,
             chunk_one_lesson,
             mark_ready,
@@ -137,7 +147,7 @@ async def test_it_marks_publishing_then_chunks_then_marks_ready(
     written = await _run(temporal_client, recorder, str(uuid.uuid4()))
 
     assert recorder.calls == [
-        "mark_publishing",
+        "begin_publish",
         "list_lesson_ids",
         "chunk_one_lesson",
         "chunk_one_lesson",
@@ -159,7 +169,7 @@ async def test_a_course_with_no_lessons_still_becomes_ready(
     written = await _run(temporal_client, recorder, str(uuid.uuid4()))
 
     assert written == 0
-    assert recorder.calls == ["mark_publishing", "list_lesson_ids", "mark_ready"]
+    assert recorder.calls == ["begin_publish", "list_lesson_ids", "mark_ready"]
 
 
 # --- FR-13, the reason Temporal is in the brief ----------------------------
@@ -254,3 +264,71 @@ async def test_the_same_course_cannot_be_published_twice_at_once(
             )
     finally:
         await handle.terminate()
+
+
+# --- republishing ----------------------------------------------------------
+#
+# The same chunking on a course that is already live. What changes is that
+# the workflow must not touch the status: `can_view` only lets `ready`
+# through, so moving it would take a published course out of the catalogue
+# for the length of a background job - and leave it out for good if the job
+# then failed.
+
+
+async def test_a_republish_chunks_without_touching_the_status(
+    temporal_client: Client,
+) -> None:
+    """Every lesson is still processed. Neither status activity runs."""
+    recorder = Recorder(lessons=3, is_first=False)
+
+    written = await _run(temporal_client, recorder, str(uuid.uuid4()))
+
+    assert written == 6
+    assert recorder.calls == [
+        "begin_publish",
+        "list_lesson_ids",
+        "chunk_one_lesson",
+        "chunk_one_lesson",
+        "chunk_one_lesson",
+    ]
+    assert "mark_ready" not in recorder.calls
+
+
+async def test_a_failed_republish_leaves_the_course_alone(
+    temporal_client: Client,
+) -> None:
+    """The asymmetry that makes republishing safe.
+
+    A first publish that fails goes to `failed`, and should: nobody could
+    see the course anyway. A republish that fails must not, because the
+    course is live, enrolled students are reading it, and `failed` is both
+    terminal and invisible. The material in lessons.content is untouched by
+    any of this - only the chunks are stale, and nothing reads those until
+    Module 4.
+
+    The cost is that nobody is told. GET /courses/{id}/publish/status is
+    where that answer lives; recording it durably is Module 3's FailedEvent.
+    """
+    recorder = Recorder(lessons=3, fail_on=1, is_first=False)
+
+    with pytest.raises(WorkflowFailureError):
+        await _run(temporal_client, recorder, str(uuid.uuid4()))
+
+    assert "mark_failed" not in recorder.calls
+    assert "mark_ready" not in recorder.calls
+
+
+async def test_the_workflow_still_fails_so_temporal_records_it(
+    temporal_client: Client,
+) -> None:
+    """Leaving the course alone is not the same as reporting success.
+
+    The workflow re-raises, so Temporal marks the execution Failed and the
+    history keeps the exception and the lesson it died on. That recorded
+    outcome is the only trace a failed republish leaves - and it is exactly
+    what the publish-status endpoint reads back.
+    """
+    recorder = Recorder(lessons=2, fail_on=1, is_first=False)
+
+    with pytest.raises(WorkflowFailureError):
+        await _run(temporal_client, recorder, str(uuid.uuid4()))

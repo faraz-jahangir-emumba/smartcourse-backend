@@ -19,10 +19,10 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from smartcourse.workflows.activities import (
+        begin_publish,
         chunk_one_lesson,
         list_lesson_ids,
         mark_failed,
-        mark_publishing,
         mark_ready,
     )
 
@@ -50,15 +50,27 @@ class PublishCourseWorkflow:
     async def run(self, course_id: str) -> int:
         """Publish a course. Returns the number of chunks written.
 
-        draft -> publishing -> ready, or -> failed if anything goes wrong.
+        Two shapes, decided by the first activity:
+
+            first publish   draft -> publishing -> ready
+                                                -> failed
+            republish       ready -> ready -> ready, whatever happens
+
+        The chunking in the middle is identical. What differs is only
+        whether the status column is allowed to move, and it is not allowed
+        to for a course students are already reading - see begin_publish.
         """
         # Short timeout: this is a single UPDATE. A minute is already far
         # longer than it can legitimately take, and the point of the limit
         # is to notice a dead worker, not to accommodate a slow one.
         quick = timedelta(seconds=30)
 
-        await workflow.execute_activity(
-            mark_publishing, course_id, start_to_close_timeout=quick
+        # Held in a local, which is safe precisely because it came from an
+        # activity: the value is in the history and replays identically. A
+        # workflow that branched on something it read itself would be a
+        # different workflow on every replay.
+        is_first = await workflow.execute_activity(
+            begin_publish, course_id, start_to_close_timeout=quick
         )
 
         try:
@@ -84,9 +96,10 @@ class PublishCourseWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
 
-            await workflow.execute_activity(
-                mark_ready, course_id, start_to_close_timeout=quick
-            )
+            if is_first:
+                await workflow.execute_activity(
+                    mark_ready, course_id, start_to_close_timeout=quick
+                )
             return written
 
         except Exception:
@@ -99,9 +112,16 @@ class PublishCourseWorkflow:
             # the workflow's position is recorded, so if the worker is
             # killed between the failure and this line, Temporal resumes and
             # finishes the compensation anyway.
-            await workflow.execute_activity(
-                mark_failed, course_id, start_to_close_timeout=quick
-            )
+            #
+            # A republish has nothing to compensate. The course never left
+            # `ready`, and its chunks are still the ones from last time - a
+            # complete, consistent set, just not the newest. Marking it
+            # `failed` would unpublish a working course over derived data
+            # no reader touches.
+            if is_first:
+                await workflow.execute_activity(
+                    mark_failed, course_id, start_to_close_timeout=quick
+                )
             # Re-raised so the workflow itself ends as failed. Swallowing it
             # would report success for a publish that did not happen - the
             # same mistake as committing after the response was sent.

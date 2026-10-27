@@ -17,6 +17,7 @@ first one died. A session handed in from outside would belong to a process
 that may no longer exist.
 """
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from temporalio import activity
@@ -24,8 +25,6 @@ from temporalio import activity
 from smartcourse.config import get_settings
 from smartcourse.infra.db.models.course import (
     STATUS_FAILED,
-    STATUS_PUBLISHING,
-    STATUS_READY,
     Lesson,
 )
 from smartcourse.infra.db.repositories import (
@@ -45,15 +44,27 @@ from smartcourse.services import publishing
 
 
 @activity.defn
-async def mark_publishing(course_id: str) -> None:
-    """FR-12's first half: the course is visibly being worked on."""
+async def begin_publish(course_id: str) -> bool:
+    """Open a publish, and tell the workflow which kind it is.
+
+    True for a first publish, which moves the course to `publishing` -
+    FR-12's visible progress. False for a republish, which changes nothing:
+    the course is live and students are reading it, and the status column is
+    what decides whether they still can.
+
+    Returning the answer rather than letting the workflow work it out is the
+    whole trick. A workflow is replayed from its history, so if it read the
+    database itself it would see today's value on replay and could take a
+    different branch than the original run. An activity's result is recorded
+    once and handed back unchanged for ever, which makes it safe to branch
+    on.
+    """
     async with SessionFactory() as session:
-        await publishing.set_status(
-            CourseRepository(session),
-            course_id=UUID(course_id),
-            status=STATUS_PUBLISHING,
+        is_first = await publishing.begin_publish(
+            CourseRepository(session), course_id=UUID(course_id)
         )
         await session.commit()
+        return is_first
 
 
 @activity.defn
@@ -112,12 +123,20 @@ async def mark_ready(course_id: str) -> None:
 
     The workflow calls this last, after every lesson has been chunked. If
     any of them failed, the workflow raises instead and this never runs.
+
+    Only on a first publish. A republish skips it, because the course is
+    already `ready` and there is nothing to announce.
+
+    The clock is read here rather than in the workflow, where it is
+    forbidden: workflow.now() exists and is replay-safe, but passing it in
+    would put a timestamp in the workflow's arguments for no gain. An
+    activity may read the real clock, and its result is recorded.
     """
     async with SessionFactory() as session:
-        await publishing.set_status(
+        await publishing.complete_publish(
             CourseRepository(session),
             course_id=UUID(course_id),
-            status=STATUS_READY,
+            finished_at=datetime.now(timezone.utc),
         )
         await session.commit()
 
@@ -137,6 +156,18 @@ async def mark_failed(course_id: str) -> None:
     chunks are keyed by content_hash, so the next attempt reuses them
     instead of redoing the work. Deleting them would throw away exactly what
     FR-11a exists to preserve.
+
+    Only on a first publish, and that asymmetry is deliberate. A course that
+    has never been live can safely go to `failed` - nobody loses anything
+    they had. A live course cannot: `failed` is terminal and invisible to
+    students, so a chunking hiccup would pull a working course out of the
+    catalogue indefinitely over derived data that no reader touches. A
+    republish that fails leaves the course exactly as it was, serving the
+    chunks from last time.
+
+    The cost is that the instructor is not told. That is what
+    GET /courses/{id}/publish/status answers, and recording it durably is
+    Module 3's FailedEvent.
     """
     async with SessionFactory() as session:
         await publishing.set_status(
@@ -152,7 +183,7 @@ async def mark_failed(course_id: str) -> None:
 # workflow waiting for one that never comes - no error, just a workflow
 # sitting on Running forever.
 ALL_ACTIVITIES = [
-    mark_publishing,
+    begin_publish,
     list_lesson_ids,
     chunk_one_lesson,
     mark_ready,

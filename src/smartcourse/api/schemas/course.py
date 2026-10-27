@@ -132,7 +132,47 @@ class PublishAccepted(BaseModel):
     # Exposed deliberately. It is the handle for this publish in Temporal's
     # web UI, which is where anyone debugging a stuck publish needs to go.
     workflow_id: str
+    # Where to look to find out how it went. It used to point at the course
+    # itself, which worked only while a failed publish showed up as a failed
+    # course - true for a first publish, false for a republish, which leaves
+    # the course `ready` either way. A field that looks like an answer and
+    # cannot give one is worse than no field, so it points somewhere that
+    # can.
     status_url: str
+
+
+class PublishStatus(BaseModel):
+    """How a publish went. GET /courses/{id}/publish/status.
+
+    Two sources, deliberately, because neither is sufficient alone.
+
+    Temporal knows the outcome - it is the only thing that does, now that a
+    failed republish leaves the course untouched. But it is a workflow
+    engine, not an archive: histories age out of retention, after which a
+    long-finished publish is indistinguishable from one that never happened.
+
+    The course's own columns are durable but coarse: `ready` says a publish
+    succeeded at some point, not that the last one did.
+
+    So both are returned and the caller can tell the difference between
+    "the last publish failed" and "Temporal no longer remembers".
+    """
+
+    course_id: UUID
+    # From the database, and always true.
+    course_status: str
+    published_at: datetime | None
+    # From Temporal, and only as long as it keeps the history.
+    workflow_id: str
+    # running | completed | failed | timed_out | canceled | terminated
+    # | continued_as_new, or `unknown` when Temporal has no record - either
+    # never published, or published long enough ago to have aged out.
+    state: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    # How many chunks the publish wrote. Only knowable once it has finished,
+    # because it is the workflow's return value.
+    chunks_written: int | None = None
 
 
 class CourseCreate(BaseModel):

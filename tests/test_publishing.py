@@ -4,6 +4,7 @@ The service layer only - no Temporal here. These call the same functions the
 activities will, which is the point of keeping the logic out of the workflow.
 """
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smartcourse.infra.db.models.content import Chunk
 from smartcourse.infra.db.models.course import Course, Lesson, Module
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.db.repositories import ChunkRepository, LessonRepository
-from smartcourse.services.publishing import chunk_lesson, content_hash
+from smartcourse.infra.db.repositories import (
+    ChunkRepository,
+    CourseRepository,
+    LessonRepository,
+)
+from smartcourse.services.publishing import (
+    begin_publish,
+    chunk_lesson,
+    complete_publish,
+    content_hash,
+)
 
 # Two paragraphs of 16 and 10 estimated tokens. A ceiling of 20 keeps each
 # one whole and stops them sharing a chunk, so "the chunk containing FIRST"
@@ -221,3 +231,107 @@ async def test_lessons_come_back_in_reading_order(session: AsyncSession) -> None
 
     assert len(ids) == 3
     assert ids[0] == lesson.id
+
+
+# --- which publish is this? ------------------------------------------------
+#
+# One decision, made once at the start of a publish and carried through the
+# workflow: has this course been live before?
+#
+# A first publish runs on something nobody can see, so moving it through
+# `publishing` costs nothing and FR-12 wants the visible progress. A
+# republish runs on a course students are enrolled in and reading, and
+# can_view only lets `ready` through - so the same status moves would take a
+# live course out of the catalogue while a background job rebuilt data that
+# no reader touches.
+
+
+async def _course_of(session: AsyncSession, lesson: Lesson) -> Course:
+    module = await session.get(Module, lesson.module_id)
+    return await session.get(Course, module.course_id)
+
+
+async def test_a_first_publish_shows_its_progress(session: AsyncSession) -> None:
+    lesson = await _lesson(session)
+    course = await _course_of(session, lesson)
+
+    is_first = await begin_publish(CourseRepository(session), course_id=course.id)
+
+    assert is_first is True
+    assert course.status == "publishing"
+
+
+async def test_retrying_a_failed_course_is_still_a_first_publish(
+    session: AsyncSession,
+) -> None:
+    """`failed` means no publish ever succeeded, so nobody has seen it and
+    there is nothing to protect."""
+    lesson = await _lesson(session)
+    course = await _course_of(session, lesson)
+    course.status = "failed"
+    await session.flush()
+
+    is_first = await begin_publish(CourseRepository(session), course_id=course.id)
+
+    assert is_first is True
+    assert course.status == "publishing"
+
+
+async def test_republishing_a_live_course_does_not_move_it(
+    session: AsyncSession,
+) -> None:
+    """The change this whole path exists for.
+
+    Students are reading this course. Its lesson text is untouched by a
+    republish - only the chunks are rebuilt, and nothing outside publishing
+    reads those until the embeddings arrive in Module 4. So the honest
+    status for a course being republished is the one it already has.
+    """
+    lesson = await _lesson(session)
+    course = await _course_of(session, lesson)
+    course.status = "ready"
+    await session.flush()
+
+    is_first = await begin_publish(CourseRepository(session), course_id=course.id)
+
+    assert is_first is False
+    assert course.status == "ready"
+
+
+async def test_going_live_records_when(session: AsyncSession) -> None:
+    """published_at has existed since Module 1 and was never written, so
+    every course has reported null for it. This is the moment it means
+    something."""
+    lesson = await _lesson(session)
+    course = await _course_of(session, lesson)
+    assert course.published_at is None
+    at = datetime(2026, 10, 27, 9, 0, tzinfo=timezone.utc)
+
+    await complete_publish(
+        CourseRepository(session), course_id=course.id, finished_at=at
+    )
+
+    assert course.status == "ready"
+    assert course.published_at == at
+
+
+async def test_the_publication_date_is_not_rewritten_by_a_republish(
+    session: AsyncSession,
+) -> None:
+    """It means "when this course went live", not "when it last changed" -
+    updated_at from TimestampMixin already answers the second.
+
+    A republish never calls complete_publish at all, so this holds by
+    construction; the test pins it so a later refactor that calls it
+    unconditionally does not quietly redate every course.
+    """
+    lesson = await _lesson(session)
+    course = await _course_of(session, lesson)
+    first = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+    courses = CourseRepository(session)
+
+    await complete_publish(courses, course_id=course.id, finished_at=first)
+    is_first = await begin_publish(courses, course_id=course.id)
+
+    assert is_first is False
+    assert course.published_at == first
