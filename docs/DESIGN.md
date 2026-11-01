@@ -65,7 +65,8 @@ codes, no `temporalio` import.
 |---|---|
 | `auth.py` | register, authenticate, update profile, role self-assignment rules |
 | `course.py` | the course/module/lesson tree, visibility, editability, content gating |
-| `enrollment.py` | enrol, withdraw, listings, prerequisites, capacity |
+| `enrollment.py` | **admission** — enrol, withdraw, listings, prerequisites, capacity |
+| `progress.py` | **studying** — marking lessons finished, and FR-15's course completion |
 | `publishing.py` | publish permissions, status lifecycle, incremental chunking |
 | `chunking.py` | pure text splitting — no database, no awaits |
 
@@ -317,6 +318,80 @@ Returning both lets a caller separate "the last publish failed" from
 
 ---
 
+## 3a. Completion, and the two questions about an enrollment
+
+Added in Module 3 (FR-14, FR-15). No new infrastructure — the
+`lesson_progress` table was built in Module 1 and had never been written
+to.
+
+### A row is the fact
+
+There is no `completed` boolean. One row in `lesson_progress` means "this
+lesson was finished"; no row means it was not. Nothing stores a percentage
+either — a stored figure is wrong the moment an instructor adds a lesson,
+and nothing would recalculate it. "This person finished that lesson at
+that time" stays true whatever changes around it.
+
+The row points at the **enrollment**, not the student, which is what makes
+re-enrolling work: a second attempt is a different enrollment, so it starts
+fresh rather than inheriting the first attempt's progress.
+
+### Completion is a subset test
+
+```python
+course_just_completed = bool(required) and required <= done
+```
+
+Every lesson belonging to the course must be among those finished.
+`len(done) == len(required)` would be correct today and correct by
+coincidence: two sets of equal size can hold different things. If a lesson
+could ever leave a course while its progress row survived, counting would
+report a course complete that was not. The subset version says what is
+meant.
+
+`bool(required)` guards the empty course — the empty set is a subset of
+everything, so without it a course with no lessons would report itself
+complete.
+
+### The two questions, and why they are two methods
+
+This is the part worth remembering, because the first version got it
+wrong.
+
+| Question | Method | Active | Completed | Withdrawn |
+|---|---|---|---|---|
+| May they take up a **seat**? | `get_active` | yes | no | no |
+| May they read the **material**? | `get_for_content` | yes | **yes** | no |
+
+They sound contradictory and are not. Capacity is how many people can
+study *at once*, so a student who finishes releases their seat. Access is
+about having earned the material, so they keep reading. Withdrawing fails
+both — giving a course up is the opposite of finishing it.
+
+**`may_read_content` asked `get_active` until FR-15 existed.** That was
+harmless while nothing could reach `completed`, and it meant the first
+version of this feature locked a student out of a course at the exact
+moment they completed it. Every test of the enrolment gate in Module 2 had
+run against the only status that occurred.
+
+### A completed course stays completed
+
+An instructor who adds a lesson to a course somebody has already finished
+does not re-open it; the student is refused with 409 and the course stays
+complete.
+
+Re-opening would be wrong in two directions. It retracts an achievement
+nobody asked to retract — and it reaches into a *different* course, because
+FR-08 reads `completed` for prerequisites. Editing one course must not be
+able to invalidate a student's enrollment in another.
+
+### No undo
+
+Completion is the student's own claim about their own learning rather than
+a grade somebody awards, and a record that can be retracted is not much of
+a record. The cost is a misclick with no recovery — which is exactly why
+completing a course no longer removes access to it.
+
 ## 4. Key design decisions
 
 Each row is a decision that could reasonably have gone the other way.
@@ -348,6 +423,9 @@ Each row is a decision that could reasonably have gone the other way.
 | Active enrolments only; completing frees a seat | Counting completed against capacity | A course with capacity 2 whose two students finish would be permanently full. Capacity is how many can study *at once* |
 | `content_locked` as an explicit field | Letting clients infer it from null content | Null is ambiguous — an unwritten lesson looks exactly like a withheld one, and the inference breaks the first time an instructor saves an empty lesson |
 | Chunks carry `content_hash` | Comparing text | It is what makes a republish incremental, and it is a cheap column |
+| Completion is a row, and the percentage is counted | A `completed` flag and a stored percentage | A stored figure is wrong the moment a lesson is added, and nothing recalculates it |
+| `POST /lessons/{id}/completion` | `/complete`; `PATCH /lessons/{id}/status` | A noun says what is created. `status` would read as a property of the lesson — and lessons are a plausible future owner of a real status — when this is a fact about the caller |
+| 200 on completion, not 201 | 201, or alternating 201/200 | The second identical request creates nothing. 201 would be a lie, and alternating makes clients branch on what `newly_completed` already says |
 
 ### A bug worth recording
 
@@ -378,7 +456,7 @@ would have passed every test that only reads responses.
 |---|---|
 | **No outbox.** `POST /publish` writes nothing, but `start_workflow` succeeding and the response being lost are still two facts in two systems | The general fix is Module 3's event work. The endpoint's current shape makes the window as small as it can be without one |
 | **A failed republish tells nobody.** The instructor has to ask the status endpoint | Pushing it needs `FailedEvent` — modelled, unused, and Module 3 (Guidelines §5 Week 3, "Events & Observability") |
-| **`completed` is unreachable.** Nothing sets it, so prerequisites cannot yet be satisfied | FR-14/15, Module 3. Tested anyway, so whoever writes the completion code inherits the rule rather than inventing one |
+| ~~**`completed` is unreachable**~~ — closed by FR-14/15 | `POST /lessons/{id}/completion` reaches it. Two rules that had never run now do: completing frees a seat, and FR-08's "completed, not merely started" prerequisite can finally be satisfied |
 | **Token counts are estimates** — `words × 1.3`, not a tokenizer | No model is chosen yet. Swapping in a real tokenizer changes one function, and every size check already measures the joined string rather than summing estimates |
 | **Uploads and extraction are not built.** `Asset` exists; nothing writes it | Cut from Module 2 deliberately — the PRD over-scoped it relative to the Guidelines' Week 2 |
 | **`domain/` holds only errors.** Entities are SQLAlchemy models in `infra/db/models/` | Honest tradeoff. Separate domain entities would mean mapping every row twice for a system whose rules are mostly about rows. The cost is that `services` import from `infra`, so the dependency arrow is not as clean as the diagram suggests. Revisit if the rules outgrow the tables |
@@ -393,6 +471,8 @@ would have passed every test that only reads responses.
 | `test_publish_workflow.py` | workflow, Temporal server | the activities |
 | `test_publish_endpoint.py` | endpoint, database | the Temporal client |
 | `test_publish_end_to_end.py` | **all of it** | nothing |
+
+`test_progress.py` covers FR-14/15 through the API. Three of its tests exercise rules that had never run before completion existed: a freed seat, a satisfied prerequisite, and the content gate holding open for a student who has finished.
 
 The first three each test one half against a fake of the other, which is the
 right shape for each — and together they still left a gap: nothing checked

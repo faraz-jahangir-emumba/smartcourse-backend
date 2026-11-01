@@ -409,6 +409,38 @@ Lesson search is scoped to one course, which is the question a student
 actually has. Without `q`, that endpoint just lists the course's lessons in
 reading order.
 
+### Progress
+
+```
+POST /lessons/{id}/completion     mark a lesson finished
+GET  /courses/{id}/progress       how far am I through this course
+```
+
+`completion` rather than `complete`, because a noun says what is being
+created. It also cannot be mistaken for a property of the lesson the way
+`status` could - a lesson is not completed, a person completes it, and two
+students see different answers for the same lesson.
+
+**There is no undo.** Completion is the student's own claim about their own
+learning rather than a grade somebody awards.
+
+200 rather than 201, although it usually creates a row: the second
+identical request creates nothing, and `newly_completed` in the body says
+which happened. A double-click cannot push the percentage past 100 - the
+unique index sees to that.
+
+**Finishing the last lesson completes the course** (FR-15), in the same
+transaction. Two things follow, and they sound contradictory until you
+separate the questions they answer:
+
+| | |
+|---|---|
+| the seat is freed | capacity is how many can study *at once*, and a finished student is not studying |
+| the material stays readable | they earned it by finishing |
+
+Withdrawing fails both, which is the distinction: one gave the course up,
+the other finished it.
+
 ### Three things worth knowing before using it
 
 **Who can see what.** FR-05 promises students browse *published* courses, and
@@ -558,7 +590,7 @@ and Jaeger, then LangGraph and a vector store.
 |---|---|---|
 | **1** | Foundation and core services | **complete** |
 | **2** | Enrollment and publishing workflow | **complete** |
-| 3 | Event-driven system and observability | not started |
+| 3 | Event-driven system and observability | **in progress** |
 | 4 | Retrieval layer | not started |
 | 5 | AI assistant and streaming | not started |
 

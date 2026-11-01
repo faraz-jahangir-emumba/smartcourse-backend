@@ -128,18 +128,31 @@ async def may_read_content(
 
         the owning instructor   it is their course
         an admin                consistent with seeing and editing anything
-        an active enrollment    FR-06's one-per-course row
+        a live enrollment       active, or completed
 
-    A withdrawn enrollment does not count. Leaving a course and keeping the
-    material would make withdrawing free.
+    Withdrawn does not count. Leaving a course and keeping the material
+    would make withdrawing free.
+
+    Completed does count, and that is a correction rather than a choice.
+    This asked `get_active` until FR-15 existed, which was harmless while
+    nothing could reach `completed` - and would have locked a student out
+    of a course at the exact moment they finished it. Withdrawing and
+    completing are opposites: one gave the course up, the other earned it.
+
+    Note this is a different question from the one the capacity check asks,
+    which is why it is a different repository method. A finished student
+    releases their seat - capacity is how many can study at once - and
+    keeps the material.
     """
     if ROLE_ADMIN in user.roles:
         return True
     if course.instructor_id == user.id:
         return True
 
-    active = await enrollments.get_active(student_id=user.id, course_id=course.id)
-    return active is not None
+    entitled = await enrollments.get_for_content(
+        student_id=user.id, course_id=course.id
+    )
+    return entitled is not None
 
 
 def _assert_editable(course: Course) -> None:

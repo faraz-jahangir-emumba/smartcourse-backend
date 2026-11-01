@@ -368,7 +368,7 @@ means it does not exist yet — not that the row was forgotten.
 | FR-11a Re-publishing skips unchanged content | SCHEMA.md §8 (`content_hash`) | — | — | ⬜ Module 2 |
 | FR-12 Ready only when processing finishes | SCHEMA.md §3 (status machine) | — | — | ⬜ Module 2 |
 | FR-13 A failed publish is never half-applied | SCHEMA.md §3 | — | — | ⬜ Module 2 |
-| FR-14, FR-15 Lesson and course completion | SCHEMA.md §10 | — | — | ⬜ Module 3 |
+| FR-14, FR-15 Lesson and course completion | SCHEMA.md §10 | `services/progress.py`, `api/routers/progress.py` | `test_progress.py` | ✅ Module 3 |
 | FR-16 to FR-18 Background work, idempotency, failed events | SCHEMA.md §11 | — | — | ⬜ Module 3 |
 | FR-19, FR-20 Platform statistics | SCHEMA.md §5 | — | — | ⬜ Module 3 |
 | FR-21, FR-22 Retrieval and citation | — | — | — | ⬜ Module 4 |

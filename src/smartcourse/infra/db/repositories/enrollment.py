@@ -8,10 +8,16 @@ knows how to ask Postgres questions.
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartcourse.infra.db.models.course import Course
-from smartcourse.infra.db.models.enrollment import ENROLLMENT_ACTIVE, Enrollment
+from smartcourse.infra.db.models.enrollment import (
+    ENROLLMENT_ACTIVE,
+    ENROLLMENT_COMPLETED,
+    Enrollment,
+    LessonProgress,
+)
 
 
 class EnrollmentRepository:
@@ -85,6 +91,94 @@ class EnrollmentRepository:
                 Enrollment.status == ENROLLMENT_ACTIVE,
             )
         )
+
+    async def get_for_content(
+        self, *, student_id: UUID, course_id: UUID
+    ) -> Enrollment | None:
+        """This student's enrollment, if it still entitles them to the
+        material. Active or completed - not withdrawn.
+
+        Deliberately not `get_active`, and deliberately not a flag on it.
+        They answer different questions and the difference matters:
+
+            get_active        may they take up a *seat*?  Active only.
+            get_for_content   may they read the *material*?  Also completed.
+
+        `get_active` is what the capacity check uses, and capacity is about
+        how many people can study at once - a student who has finished is
+        not studying and their seat goes back to the pool. Reading is a
+        different question: they earned the material by finishing it.
+
+        Withdrawing is the opposite case and stays excluded. Keeping the
+        content after choosing to leave would make withdrawing free, which
+        is the rule the gate was written for.
+
+        Without this, FR-15 would lock a student out of a course at the
+        exact moment they completed it - `may_read_content` asked
+        `get_active`, written in Module 2 when `completed` was unreachable
+        and active was the only state that occurred.
+        """
+        return await self._session.scalar(
+            select(Enrollment).where(
+                Enrollment.student_id == student_id,
+                Enrollment.course_id == course_id,
+                Enrollment.status.in_((ENROLLMENT_ACTIVE, ENROLLMENT_COMPLETED)),
+            )
+        )
+
+    async def mark_lesson_complete(
+        self, *, enrollment_id: UUID, lesson_id: UUID
+    ) -> bool:
+        """Record that a lesson is finished. True if this call is what did it.
+
+        FR-14, and FR-17's "running twice does not double-count" in its
+        smallest form. A student double-clicking, or a phone retrying a
+        request whose response was lost, must not produce two rows - the
+        percentage would exceed 100.
+
+        ON CONFLICT DO NOTHING, rather than SELECT-then-INSERT. The second
+        is a check-then-act: both requests look, both find nothing, both
+        insert, and the loser gets an IntegrityError from
+        uq_lesson_progress_once at some unhelpful later moment. Postgres
+        settles it inside the single statement instead.
+
+        Worth comparing with the capacity check above, which solves a race
+        with SELECT ... FOR UPDATE. Different problem, different answer.
+        There, the decision depends on *counting* other rows, so the rows
+        have to be held still while we count. Here nothing is counted - the
+        row either exists or it does not, and a unique index already knows
+        which. A lock would be a heavier tool answering a question nobody
+        asked.
+
+        RETURNING tells us which happened: a row back means this call
+        inserted it, nothing back means it was already there. The caller
+        needs that to know whether anything actually changed.
+        """
+        statement = (
+            pg_insert(LessonProgress)
+            .values(enrollment_id=enrollment_id, lesson_id=lesson_id)
+            .on_conflict_do_nothing(constraint="uq_lesson_progress_once")
+            .returning(LessonProgress.id)
+        )
+        return await self._session.scalar(statement) is not None
+
+    async def completed_lesson_ids(self, enrollment_id: UUID) -> set[UUID]:
+        """Which lessons this enrollment has finished.
+
+        A set, because every question asked of it is membership or size:
+        "is this lesson done", "how many are done", and - for FR-15 -
+        "is every lesson in the course in here".
+
+        Ids rather than rows. Nothing needs `completed_at` yet, and
+        fetching whole rows to count them is the habit that turns a
+        progress bar into a table scan.
+        """
+        rows = await self._session.scalars(
+            select(LessonProgress.lesson_id).where(
+                LessonProgress.enrollment_id == enrollment_id
+            )
+        )
+        return set(rows)
 
     async def completed_course_ids(self, student_id: UUID) -> set[UUID]:
         """Every course this student has finished. Used for prerequisites.
