@@ -17,7 +17,11 @@ from smartcourse.domain.errors import ConflictError
 from smartcourse.infra.db.models.course import Course, CoursePrerequisite
 from smartcourse.infra.db.models.enrollment import Enrollment
 from smartcourse.infra.db.models.user import User
-from smartcourse.infra.db.repositories import CourseRepository, EnrollmentRepository
+from smartcourse.infra.db.repositories import (
+    CourseRepository,
+    EnrollmentRepository,
+    OutboxRepository,
+)
 from smartcourse.services import enrollment as enrollment_service
 from tests.conftest import auth_header, register
 
@@ -462,6 +466,7 @@ async def test_two_students_cannot_take_the_last_seat(engine) -> None:
                 await enrollment_service.enroll(
                     EnrollmentRepository(s),
                     CourseRepository(s),
+                    OutboxRepository(s),
                     course_id=course_id,
                     user=user,
                 )

@@ -26,6 +26,7 @@ from smartcourse.api.deps import (
     EnrollmentRepo,
     LessonRepo,
     ModuleRepo,
+    OutboxRepo,
 )
 from smartcourse.api.schemas.progress import (
     LessonCompletionResponse,
@@ -47,6 +48,7 @@ async def complete_lesson(
     courses: CourseRepo,
     modules: ModuleRepo,
     lessons: LessonRepo,
+    outbox: OutboxRepo,
     user: CurrentUser,
 ) -> LessonCompletionResponse:
     """200, and the progress that results.
@@ -68,6 +70,7 @@ async def complete_lesson(
         courses,
         modules,
         lessons,
+        outbox,
         lesson_id=lesson_id,
         user=user,
     )

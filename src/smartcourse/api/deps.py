@@ -24,6 +24,7 @@ from smartcourse.infra.db.repositories import (
     EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
+    OutboxRepository,
     UserRepository,
 )
 from smartcourse.infra.db.session import get_session
@@ -76,6 +77,10 @@ def get_enrollment_repository(session: SessionDep) -> EnrollmentRepository:
     return EnrollmentRepository(session)
 
 
+def get_outbox_repository(session: SessionDep) -> OutboxRepository:
+    return OutboxRepository(session)
+
+
 # All of these resolve to the same session within one request - FastAPI calls
 # each dependency once and reuses the result - so an endpoint touching a
 # course and its modules works in a single transaction.
@@ -87,6 +92,13 @@ CourseRepo = Annotated[CourseRepository, Depends(get_course_repository)]
 ModuleRepo = Annotated[ModuleRepository, Depends(get_module_repository)]
 LessonRepo = Annotated[LessonRepository, Depends(get_lesson_repository)]
 EnrollmentRepo = Annotated[EnrollmentRepository, Depends(get_enrollment_repository)]
+
+# Sharing the request's session is what makes the outbox work at all. An
+# event added through this repository is in the same transaction as the
+# enrollment or registration that caused it, so the two commit together -
+# which is the entire guarantee the pattern offers. A separate session here
+# would quietly reintroduce the gap the outbox exists to close.
+OutboxRepo = Annotated[OutboxRepository, Depends(get_outbox_repository)]
 
 def get_workflow_client() -> Any:
     """The Temporal client, for endpoints that start a workflow.

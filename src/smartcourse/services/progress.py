@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from smartcourse import events
 from smartcourse.domain.errors import (
     ConflictError,
     NotFoundError,
@@ -28,6 +29,7 @@ from smartcourse.infra.db.repositories import (
     EnrollmentRepository,
     LessonRepository,
     ModuleRepository,
+    OutboxRepository,
 )
 from smartcourse.services.course import can_view
 
@@ -142,6 +144,7 @@ async def complete_lesson(
     courses: CourseRepository,
     modules: ModuleRepository,
     lessons: LessonRepository,
+    outbox: OutboxRepository,
     *,
     lesson_id: UUID,
     user: User,
@@ -193,6 +196,22 @@ async def complete_lesson(
         # complete_publish set published_at the same way, for the same
         # reason.
         enrollment.completed_at = datetime.now(UTC)
+
+        # Feeds "completion rate" and "average time to finish a course" -
+        # the second being this event's occurred_at measured against the
+        # student.enrolled for the same enrollment_id.
+        #
+        # Inside the branch, so it fires exactly once per enrollment. It
+        # cannot fire twice: the moment the status becomes completed,
+        # _studying raises 409 and this function never runs again for this
+        # enrollment.
+        outbox.add(
+            events.course_completed(
+                enrollment_id=enrollment.id,
+                student_id=user.id,
+                course_id=course.id,
+            )
+        )
 
     return Progress(
         enrollment=enrollment,

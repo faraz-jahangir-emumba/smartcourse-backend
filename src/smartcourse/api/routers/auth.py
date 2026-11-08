@@ -8,7 +8,7 @@ layer down.
 
 from fastapi import APIRouter, status
 
-from smartcourse.api.deps import UserRepo
+from smartcourse.api.deps import OutboxRepo, UserRepo
 from smartcourse.api.schemas.auth import (
     LoginRequest,
     RegisterRequest,
@@ -28,7 +28,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     status_code=status.HTTP_201_CREATED,
     summary="Create an account",
 )
-async def register(payload: RegisterRequest, users: UserRepo) -> UserResponse:
+async def register(
+    payload: RegisterRequest, users: UserRepo, outbox: OutboxRepo
+) -> UserResponse:
     """201 Created, and the new user - without the password hash.
 
     Errors are not caught here. A ConflictError from the service becomes a 409
@@ -37,6 +39,7 @@ async def register(payload: RegisterRequest, users: UserRepo) -> UserResponse:
     """
     user = await auth_service.register_user(
         users,
+        outbox,
         email=payload.email,
         password=payload.password,
         full_name=payload.full_name,

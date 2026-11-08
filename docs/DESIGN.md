@@ -392,6 +392,138 @@ a grade somebody awards, and a record that can be retracted is not much of
 a record. The cost is a misclick with no recovery — which is exactly why
 completing a course no longer removes access to it.
 
+## 3b. Event flow: the outbox
+
+Five business facts leave SmartCourse as Kafka messages. Getting them out
+reliably is harder than it looks, because Postgres and Kafka share no
+transaction.
+
+### The problem
+
+Saving an enrollment and publishing `student.enrolled` touch two systems.
+Whichever goes second can fail on its own:
+
+| Order | Failure | Result |
+|---|---|---|
+| commit, then send | the send fails | Ali is enrolled and nobody is told — and nothing records an event was owed |
+| send, then commit | the commit fails | an event describing an enrollment that never happened |
+
+Reordering does not help. There is no order in which two independent systems
+both change or neither does.
+
+### The fix
+
+The event is written to a Postgres table, `outbox`, in the **same
+transaction** as the business change. Both rows commit or neither does, and
+there is no window between them because there is only one commit. A separate
+dispatcher then reads unpublished rows and sends them to Kafka.
+
+At the call site the whole pattern is one line:
+
+```python
+outbox.add(events.student_enrolled(...))
+```
+
+What this buys is not speed or decoupling — it is that **the set of events
+sent always matches the set of things that happened.**
+
+### What it does not buy
+
+The dispatcher can send to Kafka and crash before marking the row published,
+so a message may arrive twice. At-least-once is the guarantee. `event_id`
+travels in every envelope so a consumer can recognise a repeat — that is
+FR-17, and it is the consumer's job, not the outbox's.
+
+### Lifetimes
+
+A common misreading is that the outbox is where events are kept. It is the
+shortest-lived copy of the three:
+
+| | How long an event lives there |
+|---|---|
+| `outbox` | seconds — until the dispatcher sends it, then pruned |
+| Kafka | 7 days (`KAFKA_LOG_RETENTION_HOURS: 168`) |
+| an archive table | forever, if one is ever built |
+
+The outbox is an out-tray, not a filing cabinet. It exists to survive the gap
+between committing and sending, not to remember anything.
+
+Rows are **marked** published rather than deleted, because `attempts` and
+`published_at` are what answer "did we actually send that?" during an
+incident. Keeping them costs the dispatcher nothing: `ix_outbox_unpublished`
+is partial — `WHERE published_at IS NULL` — so a sent row drops straight out
+of the index the dispatcher queries.
+
+### The five events
+
+| Topic | Key | Events |
+|---|---|---|
+| `smartcourse.users` | `user_id` | `user.registered` |
+| `smartcourse.courses` | `course_id` | `course.published` |
+| `smartcourse.enrollments` | `course_id` | `student.enrolled`, `student.withdrew`, `course.completed` |
+
+One topic per **entity**, holding that entity's whole life story. Not one per
+event type: Kafka guarantees order only within a topic-partition, so
+splitting `student.enrolled` from `student.withdrew` would let a consumer see
+a withdrawal before the enrollment it undoes. Not one topic for everything
+either: users have nothing to do with enrollments, and a single stream would
+make every consumer read and discard most of what it got.
+
+The enrollment topic is keyed by `course_id`, not `enrollment_id`, because
+the counters that break under reordering are the per-course ones.
+
+### Thin events
+
+Payloads carry ids, never copied data:
+
+```json
+{ "enrollment_id": "…", "student_id": "…", "course_id": "…" }
+```
+
+A stored course title would be wrong the moment the course was renamed, and
+would split "most popular courses" into two rows for one course. Consumers
+share this database and can look up whatever they need.
+
+The one exception is `roles` on `user.registered`. Roles change (FR-03a), and
+*"Ali registered as a student"* is a different fact from *"Ali is a student
+today"*. Looking it up at read time would answer the second question, so a
+replay after a promotion would quietly rewrite history.
+
+### Where the events are written
+
+| Event | Written in |
+|---|---|
+| `user.registered` | `register_user`, after the flush that assigns the id |
+| `course.published` | `complete_publish` — reached only on a first publish |
+| `student.enrolled` | `enroll`, after the flush |
+| `student.withdrew` | `withdraw` |
+| `course.completed` | `complete_lesson`, inside the FR-15 branch |
+
+`course.completed` cannot fire twice: the moment that branch sets the status,
+`_studying` starts raising 409 for that enrollment.
+
+`complete_publish` runs inside a Temporal activity rather than a request, and
+builds its `OutboxRepository` on the activity's own session. An activity is
+retried after a crash, and a course left `ready` with no event sent would be
+precisely the hole this pattern closes.
+
+### Why `OutboxRepository` exists
+
+It has one method that forwards to `session.add`. It earns its place by
+keeping services away from the session: every service here takes repositories
+and never sees an `AsyncSession`, which is what stops a service committing
+halfway through a business rule.
+
+`add` is not async and does not flush. The event must land in the same commit
+as the business change, so the caller decides when that happens.
+
+### Deviation from the plan
+
+MODULE-3-PLAN.md lists `lesson.completed` as a sixth event. It is not built.
+None of the nine statistics asks about a single lesson, and `lesson_progress`
+rows already answer anything that might. An event nobody reads is retention
+and schema surface spent on nothing.
+
 ## 4. Key design decisions
 
 Each row is a decision that could reasonably have gone the other way.

@@ -1,8 +1,8 @@
 # Describes the servers SmartCourse needs, so anyone can start them with one
 # command instead of installing each by hand.
 #
-# Right now that is only Postgres. Mongo, Redis, Kafka, RabbitMQ and Temporal
-# get added in later modules, as each one is actually needed.
+# Postgres and Temporal from Modules 1 and 2, Kafka from Module 3. Mongo,
+# Redis and RabbitMQ get added as each one is actually needed.
 
 # A name for this group of containers. Without it, Docker uses the folder name
 # ("educorp"), which would not match the project.
@@ -91,6 +91,154 @@ services:
       timeout: 5s
       retries: 10
 
+  # Kafka. The record of things that happened, which other services read.
+  #
+  # Not a queue, despite looking like one. RabbitMQ (arriving with Celery)
+  # hands a message to one worker and deletes it; Kafka appends the message
+  # to a topic and *keeps* it. Several consumers each read the whole topic at
+  # their own pace, and a consumer that got something wrong can rewind and
+  # read it again.
+  #
+  # That retention is the reason both end up in this file. "Extract the text
+  # from this PDF" is worthless once done - a queue. "Ali enrolled in
+  # JavaScript on 1 November" is still true next year, and something not yet
+  # written will want to know - a log.
+  kafka:
+    # 8.x, the current line. Pinned to a minor version for the same reason
+    # postgres is pinned to 16.
+    image: confluentinc/cp-kafka:8.0.0
+    restart: unless-stopped
+
+    ports:
+      # The only port anything outside Docker uses. Our producer and
+      # consumers connect here.
+      - "9092:9092"
+
+    environment:
+      # --- KRaft -------------------------------------------------------
+      #
+      # Kafka used to need a second service, ZooKeeper, to keep track of
+      # which broker is in charge. KRaft replaced it: the broker does that
+      # bookkeeping itself. Every tutorial older than about 2023 still shows
+      # the ZooKeeper container - it is not needed and should not be copied.
+      #
+      # One process playing both parts, which is right for one machine and
+      # wrong for production, where they are separated.
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # --- listeners ---------------------------------------------------
+      #
+      # Two addresses for the same broker, and the duplication is the point.
+      # A client first asks Kafka "where are your brokers?" and then connects
+      # to whatever it is told. So the answer has to be right for *who is
+      # asking*, and there are two kinds of asker:
+      #
+      #   our app on Windows        reaches it as localhost:9092
+      #   another container         reaches it as kafka:29092
+      #
+      # Tell everyone "localhost:9092" and containers fail, because inside a
+      # container localhost is itself. This is the single most common Kafka
+      # setup problem and it is always this.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # --- one broker, so nothing can be copied anywhere ----------------
+      #
+      # Kafka normally keeps several copies of everything on different
+      # machines. There is one machine here, so every "how many copies"
+      # setting has to say 1 - the defaults are 3 and the broker refuses to
+      # start without them.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Off, which is how production runs it. With it on, writing to a
+      # mistyped topic silently creates one - and the new topic gets the
+      # broker's default partition count rather than the one the design
+      # asked for, with nothing to say so. kafka-init below creates the
+      # three real topics, the way the migrate service creates tables.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # How long a message is kept whether or not anyone has read it. Seven
+      # days is Kafka's default and plenty here - it is the window in which
+      # a broken consumer can be fixed and rewound.
+      KAFKA_LOG_RETENTION_HOURS: 168
+
+      CLUSTER_ID: smartcourse-local-cluster
+
+    # The messages themselves. Without this, restarting the container
+    # forgets every event - which would make the remembering that Kafka is
+    # here for last exactly as long as the container does.
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # Create the topics, then exit. The same shape as the migrate service,
+  # and for the same reasons: it runs once, it is visible when it fails,
+  # and the application is not made responsible for setting up its own
+  # infrastructure.
+  #
+  # Partition counts live here, beside the topic names, which is where
+  # somebody looking for them will think to look. Leaving it to
+  # auto-creation would put the real answer in a broker default that
+  # nothing in this project mentions.
+  #
+  # `--if-not-exists` makes it safe to run again. Note it does *not* fix up
+  # a topic that already exists with the wrong settings - partition counts
+  # can be raised later with --alter, never lowered, and raising one
+  # reshuffles which key lands where.
+  kafka-init:
+    image: confluentinc/cp-kafka:8.0.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # kafka:29092 - this is a container asking, so it needs the address the
+    # broker advertises to other containers.
+    #
+    # One command per line. In a YAML folded block (>) a line indented more
+    # than the first keeps its newline instead of being folded into a
+    # space - so a wrapped `--topic ...` arrives as its own command and
+    # bash reports "--topic: command not found".
+    command: >
+      bash -c "
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic smartcourse.users --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic smartcourse.courses --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic smartcourse.enrollments --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
+
+  # Somewhere to look at the topics, the way Temporal's UI shows workflows.
+  #
+  # Worth the container. Kafka has no visible output of its own, so without
+  # this the only way to find out whether a message arrived is to write a
+  # consumer and print it.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: smartcourse
+      # kafka:29092, not localhost:9092 - this is a container asking, so it
+      # needs the address the other container answers on.
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   # Apply migrations, then exit.
   #
   # Its own service rather than something the API does at startup. Two
@@ -173,3 +321,4 @@ services:
 volumes:
   postgres-data:
   temporal-data:
+  kafka-data:

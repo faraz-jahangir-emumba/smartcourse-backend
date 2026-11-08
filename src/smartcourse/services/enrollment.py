@@ -9,6 +9,7 @@ it should be locked.
 
 from uuid import UUID
 
+from smartcourse import events
 from smartcourse.domain.errors import (
     ConflictError,
     NotFoundError,
@@ -21,12 +22,17 @@ from smartcourse.infra.db.models.enrollment import (
     Enrollment,
 )
 from smartcourse.infra.db.models.user import ROLE_ADMIN, ROLE_STUDENT, User
-from smartcourse.infra.db.repositories import CourseRepository, EnrollmentRepository
+from smartcourse.infra.db.repositories import (
+    CourseRepository,
+    EnrollmentRepository,
+    OutboxRepository,
+)
 
 
 async def enroll(
     enrollments: EnrollmentRepository,
     courses: CourseRepository,
+    outbox: OutboxRepository,
     *,
     course_id: UUID,
     user: User,
@@ -88,11 +94,25 @@ async def enroll(
     # timestamp. Zero rows is the correct representation of having started
     # nothing, and it keeps the percentage honest when a lesson is added
     # tomorrow.
+
+    # FR-19: this one event feeds four of the nine statistics, and Part A's
+    # "Welcome to the course" notification. Added after the flush so the
+    # enrollment has an id, and inside the same transaction so a seat taken
+    # and the fact of it being taken are one commit.
+    outbox.add(
+        events.student_enrolled(
+            enrollment_id=enrollment.id,
+            student_id=user.id,
+            course_id=course_id,
+        )
+    )
+
     return enrollment
 
 
 async def withdraw(
     enrollments: EnrollmentRepository,
+    outbox: OutboxRepository,
     *,
     course_id: UUID,
     user: User,
@@ -110,6 +130,18 @@ async def withdraw(
         raise NotFoundError("You are not enrolled in this course.")
 
     enrollment.status = ENROLLMENT_WITHDRAWN
+
+    # Subtracted from "most popular courses". It shares a partition key with
+    # the enrollment it undoes - course_id - so a consumer can never see this
+    # before the student.enrolled it refers to.
+    outbox.add(
+        events.student_withdrew(
+            enrollment_id=enrollment.id,
+            student_id=user.id,
+            course_id=course_id,
+        )
+    )
+
     return enrollment
 
 

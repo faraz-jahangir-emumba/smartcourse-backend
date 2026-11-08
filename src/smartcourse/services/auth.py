@@ -9,6 +9,7 @@ The same functions will be called by tests, by a seed script, and later by
 background workers, none of which have a request.
 """
 
+from smartcourse import events
 from smartcourse.domain.errors import (
     AccountDisabledError,
     AuthenticationError,
@@ -20,7 +21,7 @@ from smartcourse.infra.db.models.user import (
     ROLE_STUDENT,
     User,
 )
-from smartcourse.infra.db.repositories import UserRepository
+from smartcourse.infra.db.repositories import OutboxRepository, UserRepository
 from smartcourse.infra.security import (
     hash_password,
     needs_rehash,
@@ -66,6 +67,7 @@ def _assert_self_assignable(roles: list[str]) -> None:
 
 async def register_user(
     users: UserRepository,
+    outbox: OutboxRepository,
     *,
     email: str,
     password: str,
@@ -92,7 +94,7 @@ async def register_user(
     # reads badly.
     hashed = await hash_password(password)
 
-    return await users.add(
+    user = await users.add(
         User(
             email=email,
             password=hashed,
@@ -102,6 +104,17 @@ async def register_user(
             roles=sorted(set(roles)),
         )
     )
+
+    # Feeds "total students" and "total instructors" (FR-19). This goes in
+    # the same transaction as the user, so the two cannot disagree: there is
+    # no registered account without its event, and no event for an account
+    # that was rolled back.
+    #
+    # After users.add, which flushes - so user.id exists. Before the flush it
+    # would be None and the event would name nobody.
+    outbox.add(events.user_registered(user_id=user.id, roles=user.roles))
+
+    return user
 
 
 async def authenticate_user(

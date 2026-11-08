@@ -25,7 +25,7 @@ from smartcourse.infra.db.models.enrollment import (
     Enrollment,
     LessonProgress,
 )
-from smartcourse.infra.db.models.event import FailedEvent
+from smartcourse.infra.db.models.event import FailedEvent, OutboxEvent
 from smartcourse.infra.db.models.user import User
 
 # How many people are currently on each course. FR-07, and what a catalogue
@@ -69,5 +69,6 @@ __all__ = [
     "Lesson",
     "LessonProgress",
     "Module",
+    "OutboxEvent",
     "User",
 ]

@@ -31,6 +31,7 @@ from smartcourse.infra.db.repositories import (
     ChunkRepository,
     CourseRepository,
     LessonRepository,
+    OutboxRepository,
 )
 from smartcourse.infra.db.session import SessionFactory
 from smartcourse.services import publishing
@@ -135,6 +136,11 @@ async def mark_ready(course_id: str) -> None:
     async with SessionFactory() as session:
         await publishing.complete_publish(
             CourseRepository(session),
+            # Same session, so the course going `ready` and the event
+            # announcing it are one commit. An activity can be retried after
+            # a crash, and a course left ready with no event sent would be
+            # exactly the hole the outbox exists to close.
+            OutboxRepository(session),
             course_id=UUID(course_id),
             finished_at=datetime.now(UTC),
         )

@@ -13,7 +13,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, status
 
-from smartcourse.api.deps import CourseRepo, CurrentUser, EnrollmentRepo
+from smartcourse.api.deps import (
+    CourseRepo,
+    CurrentUser,
+    EnrollmentRepo,
+    OutboxRepo,
+)
 from smartcourse.api.schemas.enrollment import (
     EnrollmentListResponse,
     EnrollmentResponse,
@@ -33,6 +38,7 @@ async def enroll(
     course_id: UUID,
     enrollments: EnrollmentRepo,
     courses: CourseRepo,
+    outbox: OutboxRepo,
     user: CurrentUser,
 ) -> EnrollmentResponse:
     """201 and the new enrollment.
@@ -43,7 +49,7 @@ async def enroll(
     route.
     """
     record = await enrollment_service.enroll(
-        enrollments, courses, course_id=course_id, user=user
+        enrollments, courses, outbox, course_id=course_id, user=user
     )
     return EnrollmentResponse.model_validate(record)
 
@@ -56,6 +62,7 @@ async def enroll(
 async def withdraw(
     course_id: UUID,
     enrollments: EnrollmentRepo,
+    outbox: OutboxRepo,
     user: CurrentUser,
 ) -> EnrollmentResponse:
     """200 and the withdrawn enrollment, not 204.
@@ -65,7 +72,7 @@ async def withdraw(
     would look like a deletion and quietly teach clients the wrong model.
     """
     record = await enrollment_service.withdraw(
-        enrollments, course_id=course_id, user=user
+        enrollments, outbox, course_id=course_id, user=user
     )
     return EnrollmentResponse.model_validate(record)
 

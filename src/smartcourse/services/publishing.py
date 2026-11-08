@@ -13,6 +13,7 @@ import hashlib
 from datetime import datetime
 from uuid import UUID
 
+from smartcourse import events
 from smartcourse.domain.errors import (
     ConflictError,
     NotFoundError,
@@ -32,7 +33,11 @@ from smartcourse.infra.db.models.user import (
     ROLE_INSTRUCTOR,
     User,
 )
-from smartcourse.infra.db.repositories import ChunkRepository, CourseRepository
+from smartcourse.infra.db.repositories import (
+    ChunkRepository,
+    CourseRepository,
+    OutboxRepository,
+)
 from smartcourse.services.chunking import chunk_text, estimate_tokens
 from smartcourse.services.course import can_view
 
@@ -179,7 +184,11 @@ async def begin_publish(courses: CourseRepository, *, course_id: UUID) -> bool:
 
 
 async def complete_publish(
-    courses: CourseRepository, *, course_id: UUID, finished_at: datetime
+    courses: CourseRepository,
+    outbox: OutboxRepository,
+    *,
+    course_id: UUID,
+    finished_at: datetime,
 ) -> None:
     """A first publish succeeded: the course goes live.
 
@@ -198,6 +207,16 @@ async def complete_publish(
 
     course.status = STATUS_READY
     course.published_at = finished_at
+
+    # Feeds "total published courses". Emitted here rather than from the
+    # endpoint that starts the publish, because this is the first moment the
+    # course is actually public - and only ever on a first publish, since a
+    # republish never reaches this function.
+    outbox.add(
+        events.course_published(
+            course_id=course.id, instructor_id=course.instructor_id
+        )
+    )
 
 
 async def chunk_lesson(

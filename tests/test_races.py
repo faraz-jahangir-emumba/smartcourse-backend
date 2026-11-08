@@ -21,6 +21,7 @@ from smartcourse.infra.db.models.user import User
 from smartcourse.infra.db.repositories import (
     CourseRepository,
     ModuleRepository,
+    OutboxRepository,
     UserRepository,
 )
 from smartcourse.services import auth as auth_service
@@ -110,6 +111,7 @@ async def test_a_lost_duplicate_email_race_is_a_conflict_not_a_crash(
             try:
                 await auth_service.register_user(
                     UserRepository(s),
+                    OutboxRepository(s),
                     email=email,
                     password="correct-horse-battery",
                     full_name="Racer",

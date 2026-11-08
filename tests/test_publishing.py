@@ -16,6 +16,7 @@ from smartcourse.infra.db.repositories import (
     ChunkRepository,
     CourseRepository,
     LessonRepository,
+    OutboxRepository,
 )
 from smartcourse.services.publishing import (
     begin_publish,
@@ -308,7 +309,10 @@ async def test_going_live_records_when(session: AsyncSession) -> None:
     at = datetime(2026, 10, 27, 9, 0, tzinfo=UTC)
 
     await complete_publish(
-        CourseRepository(session), course_id=course.id, finished_at=at
+        CourseRepository(session),
+        OutboxRepository(session),
+        course_id=course.id,
+        finished_at=at,
     )
 
     assert course.status == "ready"
@@ -330,7 +334,9 @@ async def test_the_publication_date_is_not_rewritten_by_a_republish(
     first = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
     courses = CourseRepository(session)
 
-    await complete_publish(courses, course_id=course.id, finished_at=first)
+    await complete_publish(
+        courses, OutboxRepository(session), course_id=course.id, finished_at=first
+    )
     is_first = await begin_publish(courses, course_id=course.id)
 
     assert is_first is False
