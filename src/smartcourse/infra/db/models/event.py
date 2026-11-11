@@ -31,6 +31,20 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from smartcourse.infra.db.base import Base, UUIDMixin
 
+# A row the dispatcher still has work to do on: not yet sent, not given up on.
+#
+# Written once because it is the predicate on both outbox indexes and on every
+# query the dispatcher runs, and those four places agreeing is not optional -
+# an index whose condition differs from the query's by one clause is an index
+# Postgres silently declines to use.
+#
+# Both indexes are partial, so they hold only the backlog - usually a handful
+# of rows - rather than every event ever sent. A row drops out of both the
+# moment it is published or abandoned, which is why marking rows rather than
+# deleting them costs the dispatcher nothing. Same idea as
+# uq_enrollments_one_active.
+LIVE_ROW_PREDICATE = "published_at IS NULL AND abandoned_at IS NULL"
+
 
 class OutboxEvent(UUIDMixin, Base):
     """An event waiting to be published to Kafka. FR-16, FR-17, FR-18.
@@ -85,6 +99,24 @@ class OutboxEvent(UUIDMixin, Base):
     # gives up ordering.
     partition_key: Mapped[str | None] = mapped_column(String(200))
 
+    # What this dispatcher must not let overtake what. Not the same question
+    # as partition_key, and conflating the two is a bug.
+    #
+    # partition_key is `course_id` for the enrollment events, because a
+    # per-course consumer wants a course's whole story in one partition. But
+    # Ali's enrollment and Sara's enrollment have no ordering relationship at
+    # all, so using that key to decide what to hold back would block Sara
+    # because Ali's event is stuck.
+    #
+    # The thing that genuinely must stay in order is one enrollment's own
+    # story - enrolled, then withdrew or completed - so the trio keys on
+    # `enrollment_id` here while still partitioning on `course_id`.
+    #
+    # Needed because `next_attempt_at` breaks FIFO by design: a backing-off
+    # enrollment can be overtaken by a withdrawal that is due now, and a
+    # consumer would see someone leave a course they never joined.
+    ordering_key: Mapped[str] = mapped_column(String(200))
+
     # Duplicated inside payload, and worth the duplication: it is the field
     # anyone querying this table filters on, and a column can be indexed
     # where a JSON path is awkward.
@@ -104,31 +136,76 @@ class OutboxEvent(UUIDMixin, Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    # Null means "not sent yet". The dispatcher's entire query is this
-    # column being null.
+    # Null means "not sent yet", and it is set when Kafka *accepts* the
+    # message, not when anybody consumes it. The outbox answers "did we send
+    # it?"; Kafka's own offsets answer "did they read it?".
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    # How many times sending has been tried. Not used to give up - a row
-    # that cannot be sent because Kafka is down must keep waiting - but a
-    # row with a high count and no published_at is a stuck event, and
-    # without this it is invisible.
+    # Null means "still trying". Set only by an actual decision to stop: a
+    # permanent delivery error, or 24 hours unsent. Both also write a
+    # FailedEvent row.
+    #
+    # Its own column rather than a sentinel value in `attempts`, and the
+    # reason is a bug an earlier draft would have shipped. Retry delays
+    # double, so ten attempts elapse in about seventeen minutes - meaning a
+    # twenty-minute outage would have marked the whole backlog as given up
+    # while the policy claimed 24 hours. "How many times did we try" and
+    # "did we decide to stop" are two different facts and need two columns.
+    #
+    # A live row is therefore `published_at IS NULL AND abandoned_at IS
+    # NULL`, which is the predicate on both indexes below.
+    abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # The earliest moment this row may be tried again. A new row defaults to
+    # now(), so it is due the instant it commits.
+    #
+    # On the row rather than in the dispatcher's memory, which is the part
+    # that matters: a restart, a deploy or a crash does not reset anyone's
+    # backoff, and a failing event schedules itself out of the way instead of
+    # being retried on every pass while fresh events queue behind it.
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # When sending was last tried. Nothing reads it - the schedule is
+    # entirely next_attempt_at - it exists so a human looking at a stuck row
+    # can see when it was last touched.
+    #
+    # One limit worth knowing: it is written in the same transaction as the
+    # attempt, so a dispatcher that crashes mid-send rolls it back. It
+    # records finished attempts, never crashed ones.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # How many times sending has been tried. Gates nothing - giving up is
+    # abandoned_at - but it is the exponent behind the backoff, and a row
+    # with a high count and no published_at is a stuck event that would
+    # otherwise be invisible.
     attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
 
     __table_args__ = (
-        # The dispatcher asks one question, several times a second: which
-        # rows are unpublished, oldest first. A partial index covers only
-        # the rows matching its condition, so this index holds only the
-        # backlog - usually a handful of rows - rather than every event
-        # ever published. Same idea as uq_enrollments_one_active.
+        # The dispatcher's main question: which live rows are due now? The
+        # filter is on next_attempt_at, so that is the key - the ORDER BY
+        # created_at then sorts a set small enough that sorting is free.
         #
-        # Without it, the query degrades as the table grows, and the table
-        # only ever grows.
+        # This replaces an earlier index keyed on created_at, from when the
+        # query was simply "oldest unpublished row". Retry scheduling changed
+        # the question, so it changed the index.
         Index(
-            "ix_outbox_unpublished",
+            "ix_outbox_due",
+            "next_attempt_at",
+            postgresql_where=text(LIVE_ROW_PREDICATE),
+        ),
+        # The ordering guard: "is there an older live row on this key?". Asked
+        # once per candidate row, so it has to be an index lookup rather than
+        # a scan. Leading on ordering_key because that is the equality test;
+        # created_at second so the comparison is answered by the same index.
+        Index(
+            "ix_outbox_ordering",
+            "ordering_key",
             "created_at",
-            postgresql_where=text("published_at IS NULL"),
+            postgresql_where=text(LIVE_ROW_PREDICATE),
         ),
         CheckConstraint("attempts >= 0", name="ck_outbox_attempts_non_negative"),
     )

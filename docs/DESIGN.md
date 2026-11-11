@@ -524,6 +524,332 @@ None of the nine statistics asks about a single lesson, and `lesson_progress`
 rows already answer anything that might. An event nobody reads is retention
 and schema surface spent on nothing.
 
+## 3c. Event flow: the dispatcher
+
+Section 3b put the event safely in Postgres. This section is the other half:
+getting it out again, at least once always, without ever sending two events
+for the same thing in the wrong order.
+
+### One process, one instance
+
+The dispatcher is its own service in `compose.yml`, `restart: unless-stopped`,
+depending only on Postgres and Kafka. It does not share a process with the API
+or the Temporal worker: it is a loop that should keep running when a request
+handler crashes, and nothing it does belongs on the request path.
+
+Exactly one instance, deliberately. Two would hold locks on different rows and
+could publish two events for the same enrollment out of order - the one thing
+the ordering rules below exist to prevent. The cost is a single point of
+failure; the mitigation is that a crash loses nothing, because an unsent row
+is still unsent.
+
+### Three clocks, three jobs
+
+Waking the dispatcher, retrying a failure, and sweeping for stragglers are
+three different questions, and answering them with one number is how a polling
+loop ends up either wasteful or slow.
+
+| mechanism | job |
+|---|---|
+| `NOTIFY` on insert | send a new event immediately |
+| a 5-minute ticker | catch a missed notification, and pick up rows that have become due |
+| `next_attempt_at` on the row | how long a *failed* event waits before the next try |
+
+Because they are separate, the ticker interval can change without changing
+retry behaviour, and a retry delay can be tuned without making the loop busier.
+
+An earlier draft polled every 500ms. Measured, that query costs 0.486ms - about
+1.4 minutes of database time per day, which is affordable but pays for nothing:
+it asks a question Postgres already knows how to volunteer.
+
+### Why a trigger, and why a dedicated connection
+
+The `NOTIFY` is raised by a Postgres trigger on `outbox`, not by application
+code. Two reasons:
+
+- services stay ignorant of Kafka and of the dispatcher. A service writes a
+  row; what reads that row is not its concern.
+- a notification raised inside a transaction is delivered **only on commit**.
+  A rolled-back event can therefore never wake anything - the same guarantee
+  the outbox itself relies on, obtained for free.
+
+Several inserts in one transaction collapse into one notification, because the
+payload is empty and Postgres de-duplicates identical notifications on a
+channel. That is the right behaviour: the dispatcher runs the same query
+whether it was woken once or ten times.
+
+The listener needs a **raw asyncpg connection held open for the process's
+lifetime**, separate from the SQLAlchemy pool. `LISTEN` is a property of a
+connection; a pooled connection is handed back after each use and the
+subscription dies with it. So the dispatcher holds two database paths: one
+connection that does nothing but listen and set a wake flag, and the normal
+pool for the work.
+
+The notification carries no payload, not even the row id. The dispatcher runs
+its query regardless, and a payload would be a trap: two rows inserted together
+would need both ids, and the query already finds everything.
+
+### One pass
+
+```sql
+SELECT * FROM outbox o
+WHERE o.published_at    IS NULL
+  AND o.abandoned_at    IS NULL
+  AND o.next_attempt_at <= now()
+  AND NOT EXISTS (
+      SELECT 1 FROM outbox older
+      WHERE older.published_at IS NULL
+        AND older.abandoned_at IS NULL
+        AND older.ordering_key = o.ordering_key
+        AND older.created_at   < o.created_at
+  )
+ORDER BY o.created_at
+LIMIT 100
+FOR UPDATE SKIP LOCKED;
+```
+
+`FOR UPDATE` locks the rows it returns; `SKIP LOCKED` means another reader
+steps over them instead of waiting. The lock lives and dies with the
+transaction, so a dispatcher killed mid-send strands nothing - and that same
+property is where at-least-once comes from, because a crash between "Kafka
+accepted it" and "we recorded that" leaves the row to be sent again.
+
+The lock is held for the whole pass, including the network call. Releasing it
+first would buy nothing and risk a duplicate; the batch is bounded at 100 rows
+and the send is bounded by `message.timeout.ms`.
+
+All 100 messages are handed to the producer, then flushed once:
+
+```python
+for row in rows:
+    producer.produce(row.topic, key=row.partition_key, value=row.payload)
+producer.flush()
+```
+
+`produce()` only appends to librdkafka's internal queue and returns; `flush()`
+is where the waiting happens. A batch of 100 therefore costs roughly one round
+trip rather than 100. Results arrive as delivery reports, and the pass ends
+with one `UPDATE` for the rows that succeeded and one for the rows that did
+not.
+
+A full batch means more is probably waiting, so the loop runs again
+immediately. A partial batch means the backlog is drained, so it sleeps until a
+notification or the next tick.
+
+### Ordering: two keys, not one
+
+`partition_key` and ordering are easily conflated. They answer different
+questions, and using one for both is a bug.
+
+| | question | value |
+|---|---|---|
+| `partition_key` | which Kafka partition, i.e. what *Kafka* keeps in order | `course_id` |
+| `ordering_key` | what *this dispatcher* must not let overtake | `enrollment_id` |
+
+The dispatcher needs its own notion because `next_attempt_at` breaks FIFO by
+design - that is what a backoff is. Without a guard:
+
+```
+10:00:00  Ali enrols      -> E1 written, tried, Kafka hiccups, retry at 10:00:02
+10:00:01  Ali withdraws   -> E2 written, due immediately
+10:00:01  E2 sent         <- the withdrawal
+10:00:02  E1 sent         <- the enrollment
+```
+
+A consumer sees a withdrawal for an enrollment it has never heard of, and a
+seat count goes negative. The `NOT EXISTS` clause above is the fix: an event is
+not sent while an older live event shares its `ordering_key`.
+
+Using `partition_key` for the guard would block Sara's enrollment because Ali's
+is stuck - two facts with no relationship to each other. The narrower key
+blocks only what genuinely must not be reordered.
+
+A useful consequence: because the guard excludes siblings, **a batch can never
+contain two events with the same `ordering_key`**, so nothing inside a batch
+can overtake anything else.
+
+| event | `partition_key` | `ordering_key` |
+|---|---|---|
+| `user.registered` | `user_id` | `user_id` |
+| `course.published` | `course_id` | `course_id` |
+| `student.enrolled` | `course_id` | `enrollment_id` |
+| `student.withdrew` | `course_id` | `enrollment_id` |
+| `course.completed` | `course_id` | `enrollment_id` |
+
+### Deciding what a failure means
+
+The dispatcher must tell "try again later" from "this will never work", and it
+must do so without knowing what Kafka is.
+
+A `Publisher` protocol with a single method:
+
+```python
+class Publisher(Protocol):
+    async def publish(
+        self, events: Sequence[OutboxEvent]
+    ) -> dict[UUID, DeliveryError | None]: ...
+```
+
+It takes a batch, because every transport worth using is batch-shaped -
+`produce()` queues and returns, and the waiting happens once in `flush()`. It
+reports per event rather than raising, because a batch has no single outcome
+and an exception can only describe one. Anything actually raised from a
+publisher is therefore a bug, not a delivery failure, and must be allowed to
+crash rather than be mistaken for "Kafka is having a moment" and retried for a
+day.
+
+The two error types are the entire shared vocabulary:
+
+| exception | meaning |
+|---|---|
+| `PermanentDeliveryError` | something about *this message* is wrong; retrying cannot help |
+| `TransientDeliveryError` | something about the *world* is wrong; retrying can help |
+
+The wrapper translates. `KafkaPublisher` is the only file in the codebase that
+imports `confluent_kafka`, and it holds a deliberately short list of codes that
+are permanent - `MSG_SIZE_TOO_LARGE`, `INVALID_MSG`, `RECORD_LIST_TOO_LARGE`,
+`_VALUE_SERIALIZATION` and its `_KEY_SERIALIZATION` twin. **Everything else,
+including anything unrecognised, is transient.**
+
+That default is the whole design, and it is chosen by asking which mistake
+hurts more:
+
+| mistake | cost |
+|---|---|
+| called transient, actually permanent | retries, eventually abandoned. Late, but correct |
+| called permanent, actually transient | a real event is thrown away. Data loss |
+
+So the list grows only when something is proven permanent. A misconfigured ACL,
+for instance, stays transient: it retries, the one-hour warning fires, a human
+fixes the ACL, and the backlog drains. Marking it permanent would have killed
+every event raised during the outage.
+
+An earlier draft tried to classify with `KafkaError.retriable()`. Verified
+before building on it: that flag is attached by librdkafka to real errors and
+reads `False` for an error constructed from a code, including
+`_ALL_BROKERS_DOWN`. It cannot be relied on, and the approach was dropped.
+
+### Backoff, and why one success resets everything
+
+A transient failure increments `attempts`, stamps `last_attempt_at`, and
+schedules the next try:
+
+```python
+delay = min(2 ** attempts, backoff_cap_seconds(event.event_type))
+next_attempt_at = now() + delay
+```
+
+Doubling, then capped. The cap is what decides recovery time: whatever it is,
+the system notices a recovered service within that long.
+
+The caps live in one table in `events.py`, next to the event-type constants:
+
+```python
+DEFAULT_BACKOFF_CAP_SECONDS = 1800        # 30 minutes
+
+BACKOFF_CAP_SECONDS = {
+    COURSE_PUBLISHED: 60,
+    STUDENT_ENROLLED: 300,
+    COURSE_COMPLETED: 300,
+}
+```
+
+Looked up at send time rather than stored on the row. `topic` *is* stored,
+because routing is a fact about the event decided when it is created; a backoff
+cap is a tuning knob, and a knob stamped into 4,000 waiting rows cannot be
+turned during the incident it matters in. An event type missing from the table
+gets the default, so adding an event requires remembering nothing.
+
+The schedule itself is on the row rather than in the dispatcher's memory, and
+that is the part that matters: a restart, a deploy or a crash does not reset
+anyone's backoff, and the schedule is visible in `psql`.
+
+**One success resets the whole backlog.** After any successful send:
+
+```sql
+UPDATE outbox SET next_attempt_at = now()
+WHERE published_at IS NULL AND abandoned_at IS NULL AND next_attempt_at > now();
+```
+
+A success proves the service is up, which makes every waiting row's schedule
+stale information. Without this, a two-hour outage would end with each event
+serving out its own thirty minutes. With it, the first event whose timer
+expires acts as a probe for all of them and the backlog drains together.
+
+This is also what the shorter cap on `course.published` is really for. Not
+because the event is urgent - the course is `ready` in Postgres and fully
+enrollable before Kafka hears anything, so what is delayed is a statistic and a
+notification, not a student. Its job is to knock on Kafka's door every minute
+so the reset fires early for everyone else.
+
+### Giving up
+
+Two things abandon an event, and both write a `FailedEvent` row and set
+`abandoned_at`:
+
+- a `PermanentDeliveryError`, immediately
+- surviving 24 hours unsent, found by a sweeper on each tick
+
+`attempts` gates nothing. It is a counter for diagnosis, and an earlier draft
+that used it as the give-up signal had a bug worth recording: because the
+delays double, ten attempts elapse in about seventeen minutes, so a
+twenty-minute outage would have abandoned the entire backlog while claiming a
+24-hour policy. A separate `abandoned_at` column keeps "how many times did we
+try" and "did we decide to stop" as the two different facts they are.
+
+Every query then reads the same sentence - `published_at IS NULL AND
+abandoned_at IS NULL` - and a replay is `UPDATE outbox SET published_at = NULL,
+abandoned_at = NULL, attempts = 0`.
+
+A third sweeper, also per tick, logs a warning for anything unsent for over an
+hour. It is a log line and nothing more until Area F adds a Prometheus gauge
+and a Grafana alert; recorded here so the gap is deliberate rather than
+discovered.
+
+### Producer settings
+
+```
+enable.idempotence = true
+acks               = all
+message.timeout.ms = 30000
+```
+
+`enable.idempotence` matters more than it looks: without it, librdkafka's own
+internal retries can reorder messages within a partition, which would quietly
+undo the ordering guard above. `acks=all` means every in-sync replica has the
+message before we write `published_at`, so that column records a real promise
+rather than a hopeful one.
+
+On SIGTERM - a redeploy, or `docker compose down` - the dispatcher finishes the
+batch in flight and exits. Being killed mid-batch is survivable, since the
+transaction rolls back and the rows are simply still unsent, but finishing
+cleanly avoids a pointless round of duplicates.
+
+### What this does not solve
+
+Four holes, accepted rather than missed:
+
+- **An abandoned event releases its key.** If `student.enrolled` is abandoned,
+  the matching `student.withdrew` is no longer blocked and reaches consumers as
+  an orphan. Holding it forever is worse: the key would jam permanently and a
+  true fact would be lost as well. Consumers already have to tolerate
+  duplicates under at-least-once; tolerating an orphan is the same discipline.
+- **Re-enrolling starts a new ordering key.** A withdrawal from an old
+  enrollment and an enrollment into a new one can therefore reorder. Harmless
+  here: popularity is a plus-one minus-one total, and completion rate pairs by
+  `enrollment_id`.
+- **The guard cannot see uncommitted rows.** Two overlapping transactions
+  writing to the same key could let the later one through first. It does not
+  bite us, because our five events are causally ordered through the database -
+  you cannot withdraw from an enrollment that is not yet committed and visible.
+- **Nobody is paged.** The one-hour warning is a log line until Area F.
+
+Pruning published rows is deferred to Area C with Celery beat. Avro and a
+Schema Registry are deferred within Area B. A `destination` column and a
+`topic`-to-`route` rename, for the day a second transport exists, stay cheap
+precisely because outbox rows are transient - the table is seconds deep, so
+there is no history to migrate.
+
 ## 4. Key design decisions
 
 Each row is a decision that could reasonably have gone the other way.

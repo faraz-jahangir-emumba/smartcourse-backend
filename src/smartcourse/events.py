@@ -71,12 +71,52 @@ COURSE_COMPLETED = "course.completed"
 # an added field is exactly what consumers are expected to do.
 SCHEMA_VERSION = 1
 
+# The longest the dispatcher will wait between retries of one event. Delays
+# double - 2s, 4s, 8s - until they hit this ceiling and stop growing.
+#
+# The cap is what decides recovery time: whatever it is, a recovered service is
+# noticed within that long. Thirty minutes is fine for a welcome email.
+DEFAULT_BACKOFF_CAP_SECONDS = 1800
+
+# The exceptions. A missing entry gets the default, so adding an event here
+# requires remembering nothing, and changing a value is one number.
+#
+# Note what this is *not* for. None of these events is urgent in the sense of a
+# user waiting: Kafka is in no read path at all. A course is `ready` in
+# Postgres and fully enrollable before Kafka hears about it, a student is
+# enrolled the moment the API returns, and progress is read straight from the
+# database. What a delay postpones is a statistic and a notification.
+#
+# The short cap on course.published is doing a different job. Because any one
+# success resets every waiting row (see the dispatcher), the event that retries
+# most often acts as a probe for the whole backlog: it knocks on Kafka's door
+# every minute, and when Kafka answers, everything drains at once. One fast
+# event is enough, which is why this table has three entries and not five.
+BACKOFF_CAP_SECONDS = {
+    COURSE_PUBLISHED: 60,
+    STUDENT_ENROLLED: 300,
+    COURSE_COMPLETED: 300,
+}
+
+
+def backoff_cap_seconds(event_type: str) -> int:
+    """How long this kind of event may wait between retries, at most.
+
+    Looked up by the dispatcher at send time rather than stored on the row.
+    `topic` *is* stored, because routing is a fact about the event decided
+    when it is created; a backoff cap is a tuning knob, and a knob stamped
+    into four thousand waiting rows cannot be turned during the incident it
+    matters in.
+    """
+    return BACKOFF_CAP_SECONDS.get(event_type, DEFAULT_BACKOFF_CAP_SECONDS)
+
 
 def _build(
     *,
     topic: str,
     event_type: str,
     partition_key: UUID,
+    ordering_key: UUID,
     data: dict[str, Any],
 ) -> OutboxEvent:
     """Wrap `data` in the standard envelope and return the row to be saved.
@@ -107,6 +147,10 @@ def _build(
         # Stored as a string so the column holds one type across every event,
         # and so the table stays readable in psql.
         partition_key=str(partition_key),
+        # Never leaves the database. It is what the dispatcher holds events
+        # back on, and is narrower than partition_key for the enrollment
+        # events - see the column comment on OutboxEvent.ordering_key.
+        ordering_key=str(ordering_key),
         event_type=event_type,
         payload={
             "event_id": str(event_id),
@@ -135,6 +179,7 @@ def user_registered(*, user_id: UUID, roles: Sequence[str]) -> OutboxEvent:
         topic=TOPIC_USERS,
         event_type=USER_REGISTERED,
         partition_key=user_id,
+        ordering_key=user_id,
         data={"user_id": str(user_id), "roles": list(roles)},
     )
 
@@ -151,6 +196,7 @@ def course_published(*, course_id: UUID, instructor_id: UUID) -> OutboxEvent:
         topic=TOPIC_COURSES,
         event_type=COURSE_PUBLISHED,
         partition_key=course_id,
+        ordering_key=course_id,
         data={"course_id": str(course_id), "instructor_id": str(instructor_id)},
     )
 
@@ -176,6 +222,7 @@ def student_enrolled(
         topic=TOPIC_ENROLLMENTS,
         event_type=STUDENT_ENROLLED,
         partition_key=course_id,
+        ordering_key=enrollment_id,
         data={
             "enrollment_id": str(enrollment_id),
             "student_id": str(student_id),
@@ -192,6 +239,7 @@ def student_withdrew(
         topic=TOPIC_ENROLLMENTS,
         event_type=STUDENT_WITHDREW,
         partition_key=course_id,
+        ordering_key=enrollment_id,
         data={
             "enrollment_id": str(enrollment_id),
             "student_id": str(student_id),
@@ -213,6 +261,7 @@ def course_completed(
         topic=TOPIC_ENROLLMENTS,
         event_type=COURSE_COMPLETED,
         partition_key=course_id,
+        ordering_key=enrollment_id,
         data={
             "enrollment_id": str(enrollment_id),
             "student_id": str(student_id),

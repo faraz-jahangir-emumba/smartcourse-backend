@@ -119,6 +119,23 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    # --- kafka ------------------------------------------------------------
+    # Where the dispatcher sends events. Defaults match compose.yml's
+    # PLAINTEXT_HOST listener, so the app runs with no .env at all; a process
+    # running *inside* Docker overrides this to kafka:29092, which is the
+    # single most common Kafka setup mistake and is always this.
+    kafka_bootstrap_servers: str = "localhost:9092"
+
+    # How long librdkafka keeps trying one message before reporting it
+    # failed. This is the clock behind every `_MSG_TIMED_OUT`, so it is also
+    # what bounds how long one dispatcher pass can take - and the pass holds
+    # a row lock throughout.
+    #
+    # 30s because it has to be comfortably longer than a leader election,
+    # which is the common reason a send stalls and recovers on its own.
+    # Shorter and we would convert ordinary Kafka housekeeping into
+    # delivery failures; longer and a dead broker holds locks for no reason.
+    kafka_message_timeout_ms: int = 30_000
 
     @model_validator(mode="after")
     def _refuse_the_dev_secret_outside_local(self) -> "Settings":
