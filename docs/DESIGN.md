@@ -632,9 +632,30 @@ trip rather than 100. Results arrive as delivery reports, and the pass ends
 with one `UPDATE` for the rows that succeeded and one for the rows that did
 not.
 
-A full batch means more is probably waiting, so the loop runs again
-immediately. A partial batch means the backlog is drained, so it sleeps until a
-notification or the next tick.
+Then the loop decides whether to run another pass at once or sleep:
+
+```python
+return self.published > 0 or self.claimed >= self.batch_size
+```
+
+The second half is the obvious one - a full batch means more is probably
+waiting. The first half is not obvious, and leaving it out is a stall rather
+than a slowdown.
+
+Publishing is exactly what releases ordering keys. A chain of three events on
+one enrollment comes out one per pass by design, so a pass that returned a
+single row out of a hundred has very likely just unblocked the next one.
+Treating that as "partial batch, backlog drained" sends the dispatcher to sleep
+waiting for a notification that is never coming - nothing new is being
+inserted - and the second event sits until the next tick. Three events that
+should take milliseconds take ten minutes, with nothing logged and nothing
+failing.
+
+It cannot spin. Publishing permanently removes rows from the live set, so that
+path shrinks the pool every time; and a pass that publishes nothing and claims
+less than a full batch stops immediately. A full batch that all fails has
+pushed every row's `next_attempt_at` into the future, so the next claim returns
+different rows.
 
 ### Ordering: two keys, not one
 
@@ -667,6 +688,17 @@ blocks only what genuinely must not be reordered.
 A useful consequence: because the guard excludes siblings, **a batch can never
 contain two events with the same `ordering_key`**, so nothing inside a batch
 can overtake anything else.
+
+The guard depends on `created_at` being a strict order, and that is why the
+column defaults to `clock_timestamp()` rather than `now()`. Postgres's `now()`
+is the *transaction's* start time, frozen for its whole life, so every row
+written in one transaction carries the same value to the microsecond - and two
+tied rows are not older than each other, so neither blocks the other and both
+go out together. No service writes two events for one key in one transaction
+today, but nothing enforces that, and a future service enrolling a student and
+completing them in one call would reorder its own events silently. Found by
+writing a test that put two events in one transaction, not by reading the
+query.
 
 | event | `partition_key` | `ordering_key` |
 |---|---|---|
@@ -768,8 +800,18 @@ anyone's backoff, and the schedule is visible in `psql`.
 
 ```sql
 UPDATE outbox SET next_attempt_at = now()
-WHERE published_at IS NULL AND abandoned_at IS NULL AND next_attempt_at > now();
+WHERE published_at IS NULL AND abandoned_at IS NULL
+  AND attempts > 0 AND next_attempt_at > now();
 ```
+
+`attempts > 0` is there because of the same frozen clock as above, in a second
+place. Inside the dispatcher's transaction `now()` is the transaction's start,
+so a row inserted *while the pass was running* is future-dated by that measure
+and was being swept up as though it were backing off. Harmless in outcome - it
+was due anyway - but it is an extra UPDATE per arriving event under load, and
+it made the log claim a backlog had been rescued when nothing was waiting.
+Saying "has actually failed at least once" is exact and has no clock in it.
+Found by reading the log of a running dispatcher.
 
 A success proves the service is up, which makes every waiting row's schedule
 stale information. Without this, a two-hour outage would end with each event
@@ -843,6 +885,15 @@ Four holes, accepted rather than missed:
   bite us, because our five events are causally ordered through the database -
   you cannot withdraw from an enrollment that is not yet committed and visible.
 - **Nobody is paged.** The one-hour warning is a log line until Area F.
+- **`clear_backoff` does not know which destination succeeded.** It clears
+  every live row, which is correct only because there is exactly one
+  publisher - a Kafka success really is evidence about every waiting event.
+  With a second transport it would clear the RabbitMQ rows on a Kafka
+  success, retry them all against a broker that is still down, and back them
+  all off again. Not data loss, but one wasted round per success against a
+  service that is already struggling. **This makes the deferred `destination`
+  column a precondition for a second transport rather than a convenience**:
+  `clear_backoff` has to be scoped to the destination that succeeded.
 
 Pruning published rows is deferred to Area C with Celery beat. Avro and a
 Schema Registry are deferred within Area B. A `destination` column and a

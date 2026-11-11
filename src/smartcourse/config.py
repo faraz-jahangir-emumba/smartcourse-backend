@@ -137,6 +137,37 @@ class Settings(BaseSettings):
     # delivery failures; longer and a dead broker holds locks for no reason.
     kafka_message_timeout_ms: int = 30_000
 
+    # --- the dispatcher ---------------------------------------------------
+    # How many outbox rows one pass claims, sends and marks. The rows stay
+    # locked for the whole pass, so this trades throughput against how long
+    # a redeploying second instance would have to skip over them.
+    dispatcher_batch_size: int = 100
+
+    # How often the loop wakes on its own. This is a backstop, not the main
+    # mechanism: a NOTIFY on insert sends a new event within milliseconds,
+    # and this catches the two things NOTIFY cannot - a notification raised
+    # while the dispatcher was restarting, and a row whose retry became due
+    # while nothing new was arriving.
+    #
+    # Five minutes rather than thirty: the retry delay is now on the row, so
+    # this interval no longer doubles as the backoff and can be short without
+    # making anything retry harder.
+    dispatcher_tick_seconds: float = 300.0
+
+    # An event unsent for this long is a warning. Something is wrong that the
+    # retry loop is not fixing by itself.
+    dispatcher_warn_after_hours: int = 1
+
+    # And at this age the dispatcher gives up: a FailedEvent is written and
+    # the row stops being selected.
+    #
+    # A duration rather than a number of attempts, deliberately. A count
+    # stops meaning anything the moment the spacing between attempts
+    # changes - ten attempts is seventeen minutes early on and five hours
+    # later - whereas "we try for a day" survives any retuning of the
+    # backoff.
+    dispatcher_abandon_after_hours: int = 24
+
     @model_validator(mode="after")
     def _refuse_the_dev_secret_outside_local(self) -> "Settings":
         """Fail to start rather than sign tokens with a published key.

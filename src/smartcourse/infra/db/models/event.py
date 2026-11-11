@@ -132,8 +132,26 @@ class OutboxEvent(UUIDMixin, Base):
     # would produce now.
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
 
+    # clock_timestamp(), not now(), and the difference is load-bearing.
+    #
+    # Postgres's now() is the *transaction's* start time, so every row
+    # written in one transaction shares it to the microsecond. The ordering
+    # guard asks "is there an older live row on this key?" with a strict <,
+    # so two tied rows do not block each other and both go out at once - in
+    # whatever order the batch happened to come back.
+    #
+    # Today no service writes two events for one ordering key in one
+    # transaction, so it could not bite. But that is an invariant nobody
+    # declared and nothing enforces: a future service that enrols a student
+    # and completes them in one go would reorder its own events, silently
+    # and only under load. clock_timestamp() is the real clock, read per
+    # statement, so rows written in one transaction are strictly ordered.
+    #
+    # The cost is that created_at is no longer the same value across a
+    # transaction. Nothing wants that from it - it is read for ordering and
+    # for the age sweeper, and both prefer the true insertion moment.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
     )
 
     # Null means "not sent yet", and it is set when Kafka *accepts* the

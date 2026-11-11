@@ -30,6 +30,7 @@ from smartcourse.infra.db.repositories.course import (
     ModuleRepository,
 )
 from smartcourse.infra.db.repositories.enrollment import EnrollmentRepository
+from smartcourse.infra.db.repositories.failed_event import FailedEventRepository
 from smartcourse.infra.db.repositories.outbox import OutboxRepository
 from smartcourse.infra.db.repositories.user import UserRepository
 
@@ -37,6 +38,7 @@ __all__ = [
     "ChunkRepository",
     "CourseRepository",
     "EnrollmentRepository",
+    "FailedEventRepository",
     "LessonRepository",
     "ModuleRepository",
     "OutboxRepository",
