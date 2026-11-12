@@ -119,6 +119,21 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    # --- temporal ---------------------------------------------------------
+    # Where the Temporal server is. Read by two processes that never meet:
+    # the API, which *starts* workflows, and the worker, which runs them.
+    #
+    # It was a module-level constant in both files until the worker moved
+    # into compose.yml, with a comment in each saying it belonged here "the
+    # moment anything runs anywhere but a laptop". That moment is a service
+    # definition: inside a container `localhost` is the container itself, so
+    # a hardcoded localhost:7233 means the API cannot reach Temporal at all.
+    #
+    # Same shape as kafka_bootstrap_servers, and for exactly the same reason:
+    # the default is the address from the host machine, and anything running
+    # inside Docker overrides it with the service name.
+    temporal_address: str = "localhost:7233"
+
     # --- kafka ------------------------------------------------------------
     # Where the dispatcher sends events. Defaults match compose.yml's
     # PLAINTEXT_HOST listener, so the app runs with no .env at all; a process

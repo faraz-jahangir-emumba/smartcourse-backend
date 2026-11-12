@@ -8,11 +8,9 @@ import logging
 
 from temporalio.client import Client
 
-logger = logging.getLogger(__name__)
+from smartcourse.config import get_settings
 
-# Where the server lives. Not in Settings yet because only two places need
-# it and both are local; it moves there the moment anything runs elsewhere.
-TEMPORAL_ADDRESS = "localhost:7233"
+logger = logging.getLogger(__name__)
 
 _client: Client | None = None
 
@@ -30,11 +28,18 @@ async def get_temporal_client() -> Client:
     The cost is that a down Temporal is discovered by the first publish
     rather than at boot - and that failure is reported honestly, see
     api/errors.py.
+
+    Read from Settings rather than a constant here, because the address
+    differs by where this process runs: localhost:7233 from your machine,
+    temporal:7233 from inside a container. It was a constant until the
+    worker was added to compose.yml, at which point the API's own container
+    was quietly pointing at itself.
     """
     global _client
     if _client is None:
-        logger.info("connecting to Temporal at %s", TEMPORAL_ADDRESS)
-        _client = await Client.connect(TEMPORAL_ADDRESS)
+        address = get_settings().temporal_address
+        logger.info("connecting to Temporal at %s", address)
+        _client = await Client.connect(address)
     return _client
 
 

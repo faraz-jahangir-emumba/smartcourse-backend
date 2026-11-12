@@ -8,6 +8,23 @@
 # ("educorp"), which would not match the project.
 name: smartcourse
 
+# How every process that talks to Postgres is configured. Written once and
+# merged into each service with `<<: *postgres-env`.
+#
+# Five services need these now - migrate, seed, api, worker and dispatcher -
+# and five copies of one password is five chances for them to drift. A
+# top-level key beginning with `x-` is an extension field: Compose ignores it
+# and it exists only to be referenced.
+#
+# "postgres", not "localhost". Inside a container localhost is the container
+# itself; the service name is how Docker's DNS finds the database.
+x-postgres-env: &postgres-env
+  POSTGRES_USER: smartcourse
+  POSTGRES_PASSWORD: smartcourse
+  POSTGRES_DB: smartcourse
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+
 services:
   # "postgres" is the name of this service. It is also the hostname other
   # containers would use to reach it later.
@@ -251,14 +268,7 @@ services:
     build: .
     command: uv run alembic upgrade head
     environment:
-      POSTGRES_USER: smartcourse
-      POSTGRES_PASSWORD: smartcourse
-      POSTGRES_DB: smartcourse
-      # "postgres", not "localhost". Inside a container localhost is the
-      # container itself; the service name is how Docker's DNS finds the
-      # database.
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+      <<: *postgres-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -278,11 +288,7 @@ services:
     build: .
     command: uv run python -m smartcourse.seed
     environment:
-      POSTGRES_USER: smartcourse
-      POSTGRES_PASSWORD: smartcourse
-      POSTGRES_DB: smartcourse
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+      <<: *postgres-env
       # Passed through from your shell or .env, with no default here. A
       # default admin password is a published admin password.
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
@@ -299,12 +305,13 @@ services:
     ports:
       - "8000:8000"
     environment:
-      POSTGRES_USER: smartcourse
-      POSTGRES_PASSWORD: smartcourse
-      POSTGRES_DB: smartcourse
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
+      <<: *postgres-env
       ENVIRONMENT: local
+      # Was a constant in infra/temporal.py until the worker moved in here.
+      # Inside this container localhost is this container, so the old value
+      # meant the API could never reach Temporal at all - a publish in Docker
+      # failed on connection refused, and nothing exercised it.
+      TEMPORAL_ADDRESS: temporal:7233
     depends_on:
       # Not just "postgres is healthy" - the schema has to exist too, or the
       # first request fails on a missing table.
@@ -316,6 +323,90 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # The Temporal worker. Runs the publishing workflow's activities.
+  #
+  # Was a manual step - "in its own terminal" in the README - which made the
+  # one-command setup a two-command setup, and only for the feature that is
+  # hardest to get right by hand. Nothing about it was ever meant to be
+  # manual; it was simply not written down here.
+  #
+  # Its own process rather than a thread inside the API, which is a decision
+  # from Module 2 and still the right one: publishing a 200-lesson course
+  # should not compete for the event loop serving logins, and a worker crash
+  # should not take the API with it. Running it as a separate *container*
+  # just makes that visible.
+  worker:
+    build: .
+    command: uv run python -m smartcourse.worker
+    restart: unless-stopped
+    environment:
+      <<: *postgres-env
+      # temporal:7233, not localhost:7233 - a container asking for another
+      # container. Same mistake as Kafka's two listeners, same fix.
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      # The activities read and write courses, lessons and chunks.
+      migrate:
+        condition: service_completed_successfully
+      # Unlike the API, this one connects at startup rather than lazily, so
+      # a Temporal that is not up yet means a crash and a restart loop.
+      temporal:
+        condition: service_healthy
+
+  # The outbox dispatcher. FR-16, FR-17, FR-18.
+  #
+  # Reads unpublished rows from `outbox` and sends them to Kafka. Nothing
+  # else does - the API writes event rows inside the same transaction as the
+  # business change and never talks to a broker. So with this container
+  # missing, everything still works and no event ever leaves the database.
+  #
+  # **Exactly one instance**, which is why there is no `deploy: replicas`
+  # here and why adding one would be a bug rather than scaling. Two
+  # dispatchers would claim different rows - SKIP LOCKED sees to that - and
+  # could publish one enrollment's events out of order, which is the single
+  # thing the ordering guard exists to prevent.
+  dispatcher:
+    build: .
+    command: uv run python -m smartcourse.dispatcher
+    restart: unless-stopped
+    environment:
+      <<: *postgres-env
+      # kafka:29092, not localhost:9092 - a container asking, so it needs the
+      # address the broker advertises to other containers.
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      # The outbox table, and the trigger that notifies on insert.
+      migrate:
+        condition: service_completed_successfully
+      # Not just "kafka is healthy" - the topics have to exist.
+      # KAFKA_AUTO_CREATE_TOPICS_ENABLE is false, so sending to a topic that
+      # is not there is an error; and the dispatcher treats an unrecognised
+      # error as transient, so it would retry quietly for 24 hours before
+      # anything was written down. Waiting for kafka-init removes the race.
+      kafka-init:
+        condition: service_completed_successfully
+
+    # Docker sends SIGTERM, waits, then SIGKILL. The default wait is 10
+    # seconds; one pass can legitimately take longer than that, because
+    # KAFKA_MESSAGE_TIMEOUT_MS is 30s and a pass does not return until
+    # librdkafka has finished trying. 40s lets the ordinary case finish.
+    #
+    # It is not a guarantee. `stop` is checked between passes, and `drain`
+    # keeps running passes while there is a backlog - so a shutdown during a
+    # large drain still ends in SIGKILL. That is survivable rather than
+    # correct: the pass in flight rolls back, its rows stay sendable, and
+    # anything Kafka already accepted arrives twice. At-least-once is the
+    # documented guarantee and `event_id` is how a consumer copes.
+    stop_grace_period: 40s
+
+    # No healthcheck, deliberately. A useful one would have to mean "the loop
+    # is still going round", and nothing exposes that yet - a process that is
+    # up but wedged would pass any check we could write today. Area F adds
+    # the Prometheus gauge that makes a real check possible. Recorded in
+    # STATE.md's Concerns rather than papered over with a check that always
+    # says yes.
+
 
 # Declares the volumes used above. Docker manages where they physically sit.
 volumes:

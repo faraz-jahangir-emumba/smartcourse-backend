@@ -20,6 +20,7 @@ import logging
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from smartcourse.config import get_settings
 from smartcourse.infra.db.session import dispose_engine
 from smartcourse.workflows.activities import ALL_ACTIVITIES
 from smartcourse.workflows.publishing import TASK_QUEUE, PublishCourseWorkflow
@@ -32,13 +33,12 @@ logger = logging.getLogger(__name__)
 
 logging.basicConfig(level=logging.INFO)
 
-# Where the server lives. Not in Settings yet because nothing else needs it;
-# it moves there the moment the worker runs anywhere but a laptop.
-TEMPORAL_ADDRESS = "localhost:7233"
-
 
 async def main() -> None:
-    client = await Client.connect(TEMPORAL_ADDRESS)
+    # In Settings, not a constant here. This process now runs in a container
+    # as well as on a laptop, and the two reach Temporal at different
+    # addresses - which is the moment the old comment here said to move it.
+    client = await Client.connect(get_settings().temporal_address)
 
     worker = Worker(
         client,

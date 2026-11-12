@@ -111,21 +111,26 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-That starts Postgres, Temporal, applies the migrations and runs the API.
-Open **<http://localhost:8000/docs>** or **<http://localhost:8000/redoc>**.
+That starts everything: Postgres, Temporal, Kafka, the migrations, the API,
+and the two background processes it needs. Open
+**<http://localhost:8000/docs>** or **<http://localhost:8000/redoc>**.
 
 `--build` matters after you change code: without it Compose reuses the image
 it already has, so your edit is not in the container.
 
-**To publish a course you also need the worker**, in its own terminal:
+| Process | What stops working without it |
+|---|---|
+| `api` | everything |
+| `worker` | publishing. Nothing in the API runs workflow code, so a publish is accepted and then waits — it does not fail, and it resumes the moment a worker appears |
+| `dispatcher` | events. Everything else still works and nothing ever reaches Kafka, because the API only writes rows to the `outbox` table |
+
+Both background processes used to be manual steps in this file. Neither was
+ever meant to be — see **[docs/DESIGN.md](docs/DESIGN.md)**.
 
 ```bash
-uv run python -m smartcourse.worker
+docker compose logs -f dispatcher    # watch events leave the outbox
+docker compose logs -f worker        # watch a publish run step by step
 ```
-
-Nothing in the API runs workflow code. Without a worker a publish is
-accepted and then waits — it does not fail, and it resumes the moment a
-worker appears.
 
 ### Working on the code
 
@@ -133,12 +138,17 @@ The container has no `--reload`, so for development run the app yourself and
 keep only the servers in Docker:
 
 ```bash
-docker compose up -d postgres temporal
+docker compose up -d postgres temporal kafka kafka-init
 uv sync
 uv run alembic upgrade head
 uv run uvicorn smartcourse.main:create_app --factory --reload
 uv run python -m smartcourse.worker       # second terminal, if publishing
+uv run python -m smartcourse.dispatcher   # third terminal, if you want events
 ```
+
+The defaults in `.env.example` point at `localhost`, which is right when the
+app runs on your machine; Compose overrides them with service names for the
+containers. So the two ways of running never need different files.
 
 ### An admin account
 

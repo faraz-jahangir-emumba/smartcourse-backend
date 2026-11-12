@@ -112,9 +112,23 @@ result is recorded once and replayed unchanged afterwards.
 
 ### Entry points
 
-`main.py` builds the FastAPI app. `worker.py` is the second process:
-`uv run python -m smartcourse.worker`. `config.py` is pydantic-settings over
-the environment. `seed.py` creates the first admin.
+`main.py` builds the FastAPI app. `worker.py` is the second process and
+`dispatcher.py` the third; both are services in `compose.yml`, and both also
+run by hand with `uv run python -m smartcourse.<name>`. `config.py` is
+pydantic-settings over the environment. `seed.py` creates the first admin.
+
+Three processes rather than one, and the split is not arbitrary: they fail
+differently and should not take each other down. Publishing a 200-lesson
+course should not compete for the event loop serving logins, and a Kafka
+outage should reach no further than the dispatcher's own retry loop.
+
+Where each one finds its dependencies is configuration, not a constant.
+`temporal_address` and `kafka_bootstrap_servers` default to `localhost`,
+which is right from your machine, and Compose overrides both with service
+names. A hardcoded `localhost` inside a container points at the container
+itself - which is the same mistake Kafka's two advertised listeners exist
+to prevent, and the reason the API could not reach Temporal from Docker
+until the worker was containerised and the problem became visible.
 
 ---
 
